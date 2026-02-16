@@ -89,12 +89,15 @@ def acquire_lock(s3, bucket, project_name, canonical_id):
     # Check existing lock
     exists, lock_data, age = get_lock_status(s3, bucket, canonical_id)
     if exists:
-        if age < LOCK_TTL_SECONDS and not FORCE_PUSH:
-            holder = lock_data.get("hostname", "unknown")
+        holder = lock_data.get("hostname", "unknown")
+        same_host = holder == platform.node()
+        if age < LOCK_TTL_SECONDS and not FORCE_PUSH and not same_host:
             print(f"  LOCK ACTIVE — held by {holder} for {age}s (TTL {LOCK_TTL_SECONDS}s)")
             print(f"  use FORCE_PUSH=1 to override")
             return False
-        if FORCE_PUSH:
+        if same_host:
+            print(f"  re-acquiring own lock (holder={holder}, age={age}s)")
+        elif FORCE_PUSH:
             print(f"  overriding stale/active lock (age={age}s, FORCE_PUSH=1)")
         else:
             print(f"  lock expired (age={age}s > TTL={LOCK_TTL_SECONDS}s), taking over")
