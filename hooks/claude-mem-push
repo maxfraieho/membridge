@@ -2,7 +2,7 @@
 # Manual push — interactive, shows output in terminal
 set -euo pipefail
 
-MEMBRIDGE_DIR="${MEMBRIDGE_DIR:-/home/vokov/membridge}"
+MEMBRIDGE_DIR="${MEMBRIDGE_DIR:-$HOME/membridge}"
 
 set -a
 source "$MEMBRIDGE_DIR/config.env"

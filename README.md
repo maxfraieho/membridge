@@ -146,7 +146,9 @@ python sqlite_minio_sync.py print_project
 ```
 ~/membridge/                         # git repo
   sqlite_minio_sync.py             # основний sync скрипт
+  claude-home/                     # Claude CLI config (source of truth)
   hooks/                           # шаблони hook-скриптів
+  scripts/                         # bootstrap скрипти (Linux, Alpine, Windows)
   config.env.example               # приклад конфігурації
   config.env -> ~/.claude-mem-minio/config.env  # symlink (не в git)
   venv/                            # Python virtualenv (не в git)
@@ -230,11 +232,14 @@ scripts/claude-cleanup-safe --kill
 
 ## Claude Config Sync (no-auth)
 
-Source of truth: Raspberry Pi 3B `~/.claude` (sanitized, no credentials).
+Source of truth: `claude-home/` directory in this repo (sanitized, no credentials).
 
-The `config/claude/` directory contains portable Claude CLI configuration:
-- `settings.json` — hooks for membridge sync (SessionStart pull, Stop push)
+Deploys portable Claude CLI configuration:
+- `CLAUDE.md` — global agent instructions
+- `skills/` — skill definitions (30+)
 - `hooks/` — session cleanup, context drift detection, execution validation
+- `commands/` — custom slash commands
+- `plugins/` — plugin metadata (not cache)
 
 ### Deploy on Linux (RPi / Orange Pi / Ubuntu / Debian)
 
@@ -248,7 +253,7 @@ cd ~/membridge && git pull && bash scripts/bootstrap-linux.sh
 cd ~/membridge && git pull && bash scripts/bootstrap-alpine.sh
 ```
 
-### Deploy on Windows 10
+### Deploy on Windows 10 (via WSL2)
 
 ```powershell
 cd ~\membridge; git pull
@@ -256,6 +261,7 @@ powershell -ExecutionPolicy Bypass -File scripts\bootstrap-windows.ps1
 ```
 
 **Auth is NOT synced** — tokens and credentials stay local on each machine.
+MinIO sync on Windows runs through WSL2.
 
 ## Full Deployment Guide
 

@@ -192,15 +192,11 @@ claude-home/                  # Claude CLI global config (source of truth)
   hooks/                      # Hook scripts (UserPromptSubmit, cleanup, etc.)
   commands/                   # Custom slash commands (session-*)
   plugins/                    # Plugin metadata (NOT cache)
-config/
-  claude/
-    settings.json             # Portable settings template
-    hooks/                    # Hook scripts for config sync
 hooks/                        # membridge MinIO sync hooks
 scripts/
-  bootstrap-linux.sh          # Linux deployment script
-  bootstrap-alpine.sh         # Alpine deployment script
-  bootstrap-windows.ps1       # Windows deployment script
+  bootstrap-linux.sh          # Linux/Alpine/Debian deployment (full stack)
+  bootstrap-alpine.sh         # Alpine prereqs + delegates to bootstrap-linux.sh
+  bootstrap-windows.ps1       # Windows WSL2 deployment
   claude-cleanup-safe         # Docker-safe process cleanup
 sqlite_minio_sync.py          # Core MinIO sync engine
 optimization-profile-orange.sh # ARM performance tuning
@@ -243,24 +239,34 @@ This step copies safe configuration files from the repo into `~/.claude/`.
 
 ### Automated Deployment (Recommended)
 
+The bootstrap scripts deploy everything from `claude-home/` (single source of truth) plus set up MinIO sync (venv, boto3, hook scripts, config.env).
+
 #### Linux (Raspberry Pi / Orange Pi / Ubuntu / Debian)
 
 ```bash
 cd ~/membridge && git pull && bash scripts/bootstrap-linux.sh
 ```
 
-#### Alpine
+#### Alpine Linux
 
 ```bash
 cd ~/membridge && git pull && bash scripts/bootstrap-alpine.sh
 ```
 
-#### Windows
+Installs Alpine packages (`bash`, `coreutils`, `git`, `curl`, `python3`, `py3-pip`, `py3-virtualenv`, `nodejs`, `npm`), verifies bash is available (Alpine uses ash by default), then delegates to `bootstrap-linux.sh`.
+
+#### Windows 10+ (via WSL2)
 
 ```powershell
 cd ~\membridge; git pull
 powershell -ExecutionPolicy Bypass -File scripts\bootstrap-windows.ps1
 ```
+
+Requires WSL2 with a Linux distro. The script:
+1. Clones/updates membridge inside WSL2
+2. Runs `bootstrap-linux.sh` inside WSL2 (MinIO sync)
+3. Deploys config to Windows-native `%USERPROFILE%\.claude\` (CLAUDE.md, skills, commands, hooks)
+4. Creates `bin\cm-push.cmd`, `cm-pull.cmd`, `cm-doctor.cmd`, `cm-status.cmd` convenience scripts
 
 ### Manual Deployment
 
@@ -839,8 +845,8 @@ Not all systems have rsync. Use `cp -a` as fallback (the manual deployment steps
 
 ```bash
 python3 -c "import json; json.load(open('$HOME/.claude/settings.json')); print('OK')"
-# If this fails, restore from backup or repo:
-# cp ~/membridge/config/claude/settings.json ~/.claude/settings.json
+# If this fails, restore from backup or re-run bootstrap:
+# bash ~/membridge/scripts/bootstrap-linux.sh
 ```
 
 ### Skills Not Loading
