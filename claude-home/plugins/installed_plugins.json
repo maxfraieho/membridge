@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "plugins": {
+    "claude-mem@thedotmack": [
+      {
+        "scope": "local",
+        "projectPath": "/home/vokov",
+        "installPath": "/home/vokov/.claude/plugins/cache/thedotmack/claude-mem/9.0.5",
+        "version": "9.0.5",
+        "installedAt": "2026-01-23T22:42:39.501Z",
+        "lastUpdated": "2026-01-24T09:28:34.588Z"
+      }
+    ]
+  }
+}

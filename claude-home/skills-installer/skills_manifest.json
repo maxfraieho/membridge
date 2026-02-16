@@ -1,0 +1,177 @@
+{
+  "manifest_version": "1.0",
+  "created": "2025-12-28",
+  "author": "Perplexity AI + Claude Code",
+  "project": "violin.pp.ua",
+  "description": "Custom Claude CLI skills for frontend development, TypeScript, SEO, Tailwind CSS, and Cloudflare infrastructure",
+  "skills": [
+    {
+      "name": "frontend-code-review",
+      "description": "Frontend code review: HTML/CSS/JS, React/Vue/Svelte, A11Y, performance, security.",
+      "path_global": "~/.claude/skills/frontend-code-review/SKILL.md",
+      "path_local": ".claude/skills/frontend-code-review/SKILL.md",
+      "category": "code-review",
+      "tags": ["frontend", "react", "vue", "accessibility", "a11y", "performance", "security", "html", "css", "javascript"],
+      "use_cases": [
+        "PR code reviews",
+        "Component accessibility audit",
+        "Performance optimization",
+        "Security vulnerability detection",
+        "Best practices enforcement"
+      ],
+      "example_prompts": [
+        "Review this React component for accessibility and performance",
+        "Check this HTML/CSS for best practices",
+        "Analyze this Vue.js app for security issues",
+        "Audit this SPA for Core Web Vitals optimization"
+      ]
+    },
+    {
+      "name": "typescript-checker",
+      "description": "TypeScript type checking, unsafe any detection, tsconfig recommendations.",
+      "path_global": "~/.claude/skills/typescript-checker/SKILL.md",
+      "path_local": ".claude/skills/typescript-checker/SKILL.md",
+      "category": "code-analysis",
+      "tags": ["typescript", "types", "type-safety", "strict-mode", "any", "null-safety"],
+      "use_cases": [
+        "JavaScript to TypeScript migration",
+        "Strict mode enablement",
+        "Type safety audits",
+        "tsconfig.json optimization",
+        "Type error debugging"
+      ],
+      "example_prompts": [
+        "Find and fix all any types in this file",
+        "Check this TypeScript project for type safety issues",
+        "Review tsconfig.json for strict mode compliance",
+        "Analyze these types for better type inference",
+        "Suggest improvements for this complex generic type"
+      ]
+    },
+    {
+      "name": "seo-analyzer",
+      "description": "SEO analysis of HTML pages: meta tags, headings, schema, technical SEO.",
+      "path_global": "~/.claude/skills/seo-analyzer/SKILL.md",
+      "path_local": ".claude/skills/seo-analyzer/SKILL.md",
+      "category": "seo",
+      "tags": ["seo", "meta-tags", "structured-data", "schema.org", "open-graph", "twitter-cards", "hreflang", "multilingual"],
+      "use_cases": [
+        "Landing page SEO optimization",
+        "Multilingual site hreflang setup",
+        "Schema.org structured data",
+        "Meta tags optimization",
+        "Technical SEO audit"
+      ],
+      "example_prompts": [
+        "Analyze this HTML page for SEO issues and improvements",
+        "Review meta tags for this landing page",
+        "Check structured data implementation for e-commerce product",
+        "Audit multilingual site for hreflang correctness",
+        "Evaluate Core Web Vitals impact on SEO"
+      ]
+    },
+    {
+      "name": "tailwind-validator",
+      "description": "Tailwind CSS usage validation: utility classes, responsive, dark mode.",
+      "path_global": "~/.claude/skills/tailwind-validator/SKILL.md",
+      "path_local": ".claude/skills/tailwind-validator/SKILL.md",
+      "category": "css",
+      "tags": ["tailwind", "css", "utility-classes", "responsive", "dark-mode", "jit", "purge"],
+      "use_cases": [
+        "Component styling review",
+        "Bundle size optimization",
+        "Responsive design audit",
+        "Dark mode implementation check",
+        "Tailwind config validation"
+      ],
+      "example_prompts": [
+        "Review this component for Tailwind CSS best practices",
+        "Optimize these Tailwind classNames for mobile-first design",
+        "Validate tailwind.config.js setup and suggest improvements",
+        "Check dark mode implementation across this codebase",
+        "Audit responsive breakpoints usage"
+      ]
+    },
+    {
+      "name": "cloudflare-inspector",
+      "description": "Cloudflare config review: DNS, caching, SSL/TLS, WAF, Workers.",
+      "path_global": "~/.claude/skills/cloudflare-inspector/SKILL.md",
+      "path_local": ".claude/skills/cloudflare-inspector/SKILL.md",
+      "category": "infrastructure",
+      "tags": ["cloudflare", "dns", "ssl", "tls", "waf", "workers", "caching", "cdn", "security"],
+      "use_cases": [
+        "Cloudflare initial setup",
+        "Security hardening (WAF, DDoS)",
+        "Caching strategy optimization",
+        "Workers script review",
+        "SSL/TLS configuration audit"
+      ],
+      "example_prompts": [
+        "Review my Cloudflare DNS and SSL configuration for security issues",
+        "Analyze this Cloudflare Worker script for performance and error handling",
+        "Audit WAF and security settings for e-commerce site",
+        "Check caching strategy for optimal performance",
+        "Validate Page Rules and Redirect Rules setup"
+      ]
+    }
+  ],
+  "installation": {
+    "global": {
+      "description": "Install skills to ~/.claude/skills/ (available in all projects)",
+      "command": "bash .claude/skills-installer/claude_skills_auto_install.sh",
+      "requires_restart": true
+    },
+    "local": {
+      "description": "Install skills to .claude/skills/ (project-specific)",
+      "command": "bash .claude/skills-installer/install_local.sh",
+      "requires_restart": false
+    },
+    "manual": {
+      "description": "Step-by-step manual installation",
+      "guide": ".claude/skills-installer/claude_skills_setup_prompt.md"
+    }
+  },
+  "validation": {
+    "checklist": ".claude/skills-installer/claude_skills_checklist.md",
+    "command": "What Skills are available?",
+    "expected_count": 5
+  },
+  "documentation": {
+    "readme": ".claude/skills-installer/README.md",
+    "quick_reference": ".claude/skills-installer/QUICK_REFERENCE.md",
+    "files_overview": ".claude/skills-installer/FILES_OVERVIEW.md",
+    "setup_guide": ".claude/skills-installer/claude_skills_setup_prompt.md"
+  },
+  "compatibility": {
+    "claude_cli_version": ">=1.0.0",
+    "tested_on": ["Linux", "macOS", "Windows (WSL)"],
+    "browsers": ["Claude Code CLI", "Claude Web (limited)"]
+  },
+  "maintenance": {
+    "update_command": "bash .claude/skills-installer/claude_skills_auto_install.sh",
+    "backup_command": "cp -r ~/.claude/skills ~/.claude/skills.backup.$(date +%Y%m%d)",
+    "rollback_command": "mv ~/.claude/skills.backup.YYYYMMDD ~/.claude/skills"
+  },
+  "troubleshooting": {
+    "skills_not_showing": [
+      "Check files exist: ls -la ~/.claude/skills/*/SKILL.md",
+      "Verify YAML format: head -5 ~/.claude/skills/*/SKILL.md",
+      "Restart Claude CLI: exit && claude"
+    ],
+    "yaml_parse_error": [
+      "Ensure --- at start and end of YAML front matter",
+      "Check for extra spaces before name: and description:",
+      "Validate no tabs (use spaces only)"
+    ],
+    "permission_denied": [
+      "chmod +x .claude/skills-installer/claude_skills_auto_install.sh",
+      "Run with bash explicitly: bash .claude/skills-installer/..."
+    ]
+  },
+  "statistics": {
+    "total_skills": 5,
+    "total_lines_of_skill_content": "~2000",
+    "installation_time_seconds": 10,
+    "skill_average_size_kb": 15
+  }
+}
