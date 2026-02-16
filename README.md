@@ -233,6 +233,38 @@ claude-memory/
         active.lock             # distributed lock file
 ```
 
+## Performance Optimization
+
+This repository includes performance optimization scripts for low-RAM ARM devices (Raspberry Pi, Orange Pi).
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `optimization-profile-orange.sh` | Applies sysctl, zram, swap, and memory tuning |
+| `scripts/claude-cleanup-safe` | Docker-safe cleanup of orphan Claude, MCP, bun, and chroma processes |
+
+### Usage
+
+```bash
+# Apply system optimizations (requires root)
+sudo bash optimization-profile-orange.sh apply
+
+# Check current optimization status
+sudo bash optimization-profile-orange.sh status
+
+# Revert all optimizations
+sudo bash optimization-profile-orange.sh revert
+
+# Preview process cleanup (dry run)
+scripts/claude-cleanup-safe
+
+# Kill orphan processes (Docker-safe)
+scripts/claude-cleanup-safe --kill
+```
+
+These optimizations significantly improve Claude CLI performance on ARM devices with limited RAM (1-2GB).
+
 ## Ліцензія
 
 MIT

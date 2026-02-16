@@ -1,0 +1,178 @@
+#!/bin/bash
+# ============================================================================
+# claude-cleanup-safe
+# Safe cleanup of Claude CLI processes — Docker-aware
+#
+# Kills: claude, bun, node (only non-Docker node processes)
+# Preserves: dockerd, containerd, docker-proxy, any Docker-related node
+#
+# Usage:
+#   claude-cleanup-safe          # Dry run (show what would be killed)
+#   claude-cleanup-safe --kill   # Actually kill processes
+#   claude-cleanup-safe --force  # Force kill (SIGKILL) after SIGTERM
+# ============================================================================
+
+set -euo pipefail
+
+MODE="${1:-dry}"
+KILLED=0
+SKIPPED=0
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# Docker-related process patterns to NEVER kill
+DOCKER_PATTERNS=(
+    "dockerd"
+    "containerd"
+    "docker-proxy"
+    "docker-init"
+    "com.docker"
+    "/usr/bin/containerd"
+    "/usr/bin/dockerd"
+)
+
+is_docker_related() {
+    local pid="$1"
+
+    # Check cmdline for Docker patterns
+    local cmdline
+    cmdline=$(cat "/proc/$pid/cmdline" 2>/dev/null | tr '\0' ' ') || return 1
+
+    for pattern in "${DOCKER_PATTERNS[@]}"; do
+        if echo "$cmdline" | grep -qi "$pattern"; then
+            return 0  # IS docker-related
+        fi
+    done
+
+    # Check if parent is a Docker process
+    local ppid
+    ppid=$(cat "/proc/$pid/status" 2>/dev/null | awk '/^PPid:/ {print $2}') || return 1
+    if [ -n "$ppid" ] && [ "$ppid" != "1" ]; then
+        local parent_cmdline
+        parent_cmdline=$(cat "/proc/$ppid/cmdline" 2>/dev/null | tr '\0' ' ') || return 1
+        for pattern in "${DOCKER_PATTERNS[@]}"; do
+            if echo "$parent_cmdline" | grep -qi "$pattern"; then
+                return 0  # Parent is docker-related
+            fi
+        done
+    fi
+
+    # Check cgroup for Docker container context
+    local cgroup
+    cgroup=$(cat "/proc/$pid/cgroup" 2>/dev/null) || return 1
+    if echo "$cgroup" | grep -qi "docker"; then
+        return 0  # Running inside Docker container
+    fi
+
+    return 1  # NOT docker-related
+}
+
+process_kill() {
+    local pid="$1"
+    local name="$2"
+    local cmdline="$3"
+
+    if is_docker_related "$pid"; then
+        echo -e "  ${YELLOW}SKIP${NC} PID $pid ($name) — Docker-related"
+        SKIPPED=$((SKIPPED + 1))
+        return
+    fi
+
+    if [ "$MODE" = "dry" ]; then
+        echo -e "  ${GREEN}WOULD KILL${NC} PID $pid ($name): $cmdline"
+        KILLED=$((KILLED + 1))
+    elif [ "$MODE" = "--kill" ]; then
+        echo -e "  ${RED}SIGTERM${NC} PID $pid ($name)"
+        kill -TERM "$pid" 2>/dev/null || true
+        KILLED=$((KILLED + 1))
+    elif [ "$MODE" = "--force" ]; then
+        echo -e "  ${RED}SIGTERM${NC} PID $pid ($name)"
+        kill -TERM "$pid" 2>/dev/null || true
+        sleep 2
+        if kill -0 "$pid" 2>/dev/null; then
+            echo -e "  ${RED}SIGKILL${NC} PID $pid ($name) — still alive"
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+        KILLED=$((KILLED + 1))
+    fi
+}
+
+echo "============================================"
+echo "  Claude CLI Safe Process Cleanup"
+echo "  Mode: $([ "$MODE" = "dry" ] && echo "DRY RUN" || echo "$MODE")"
+echo "============================================"
+echo ""
+
+# --- Claude processes ---
+echo "Claude processes:"
+found=0
+while IFS= read -r line; do
+    pid=$(echo "$line" | awk '{print $2}')
+    name=$(echo "$line" | awk '{print $11}')
+    cmdline=$(echo "$line" | cut -d' ' -f11-)
+    process_kill "$pid" "claude" "$cmdline"
+    found=1
+done < <(ps aux | grep -E '[c]laude' | grep -v "claude-cleanup" | grep -v grep)
+[ "$found" -eq 0 ] && echo "  (none found)"
+
+# --- Bun processes ---
+echo ""
+echo "Bun processes:"
+found=0
+while IFS= read -r line; do
+    pid=$(echo "$line" | awk '{print $2}')
+    cmdline=$(echo "$line" | cut -d' ' -f11-)
+    process_kill "$pid" "bun" "$cmdline"
+    found=1
+done < <(ps aux | grep -E '[b]un ' | grep -v grep)
+[ "$found" -eq 0 ] && echo "  (none found)"
+
+# --- Node processes (Docker-aware) ---
+echo ""
+echo "Node processes (Docker-aware filtering):"
+found=0
+while IFS= read -r line; do
+    pid=$(echo "$line" | awk '{print $2}')
+    cmdline=$(echo "$line" | cut -d' ' -f11-)
+    process_kill "$pid" "node" "$cmdline"
+    found=1
+done < <(ps aux | grep -E '[n]ode ' | grep -v grep)
+[ "$found" -eq 0 ] && echo "  (none found)"
+
+# --- MCP server processes ---
+echo ""
+echo "MCP server processes:"
+found=0
+while IFS= read -r line; do
+    pid=$(echo "$line" | awk '{print $2}')
+    cmdline=$(echo "$line" | cut -d' ' -f11-)
+    process_kill "$pid" "mcp-server" "$cmdline"
+    found=1
+done < <(ps aux | grep -E '[m]cp-server' | grep -v grep)
+[ "$found" -eq 0 ] && echo "  (none found)"
+
+# --- Chroma processes ---
+echo ""
+echo "Chroma/uvx processes:"
+found=0
+while IFS= read -r line; do
+    pid=$(echo "$line" | awk '{print $2}')
+    cmdline=$(echo "$line" | cut -d' ' -f11-)
+    process_kill "$pid" "chroma" "$cmdline"
+    found=1
+done < <(ps aux | grep -E '[c]hroma-mcp|[u]vx.*chroma' | grep -v grep)
+[ "$found" -eq 0 ] && echo "  (none found)"
+
+echo ""
+echo "============================================"
+echo "  Summary: $KILLED $([ "$MODE" = "dry" ] && echo "would be killed" || echo "killed"), $SKIPPED skipped (Docker)"
+echo "============================================"
+
+if [ "$MODE" = "dry" ]; then
+    echo ""
+    echo "This was a dry run. Use --kill to actually terminate processes."
+    echo "Use --force for SIGTERM + SIGKILL fallback."
+fi
