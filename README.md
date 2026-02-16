@@ -228,6 +228,35 @@ scripts/claude-cleanup-safe
 scripts/claude-cleanup-safe --kill
 ```
 
+## Claude Config Sync (no-auth)
+
+Source of truth: Raspberry Pi 3B `~/.claude` (sanitized, no credentials).
+
+The `config/claude/` directory contains portable Claude CLI configuration:
+- `settings.json` — hooks for membridge sync (SessionStart pull, Stop push)
+- `hooks/` — session cleanup, context drift detection, execution validation
+
+### Deploy on Linux (RPi / Orange Pi / Ubuntu / Debian)
+
+```bash
+cd ~/membridge && git pull && bash scripts/bootstrap-linux.sh
+```
+
+### Deploy on Alpine x86_64
+
+```bash
+cd ~/membridge && git pull && bash scripts/bootstrap-alpine.sh
+```
+
+### Deploy on Windows 10
+
+```powershell
+cd ~\membridge; git pull
+powershell -ExecutionPolicy Bypass -File scripts\bootstrap-windows.ps1
+```
+
+**Auth is NOT synced** — tokens and credentials stay local on each machine.
+
 ## Ліцензія
 
 MIT

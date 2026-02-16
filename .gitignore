@@ -23,5 +23,19 @@ hook.log
 *.swp
 *~
 
+# Python venv
+.venv/
+
+# SQLite extras
+*.sqlite
+*.sqlite3
+
+# Claude local state (never commit)
+.claude/plugins/cache/
+.claude/cache/
+.claude-mem/
+.claude-mem-minio/config.env
+.claude-mem-minio/*.log
+
 # OS
 .DS_Store

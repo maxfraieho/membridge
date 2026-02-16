@@ -1,0 +1,25 @@
+{
+  "alwaysThinkingEnabled": true,
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude-mem-minio/bin/claude-mem-hook-pull"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude-mem-minio/bin/claude-mem-hook-push"
+          }
+        ]
+      }
+    ]
+  }
+}
