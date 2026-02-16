@@ -40,7 +40,17 @@ def load_config():
             sys.exit(1)
         cfg[key] = val
     cfg["MINIO_REGION"] = os.environ.get("MINIO_REGION", "us-east-1")
+    # Optional: explicit canonical ID override (prevents hash recalculation on rename)
+    cfg["CLAUDE_CANONICAL_PROJECT_ID"] = os.environ.get("CLAUDE_CANONICAL_PROJECT_ID", "")
     return cfg
+
+
+def resolve_canonical_id(cfg):
+    """Return canonical project ID — explicit override or sha256(project_name)[:16]."""
+    explicit = cfg.get("CLAUDE_CANONICAL_PROJECT_ID")
+    if explicit:
+        return explicit
+    return hashlib.sha256(cfg["CLAUDE_PROJECT_ID"].encode()).hexdigest()[:16]
 
 
 def sha256_file(path):
@@ -168,48 +178,42 @@ def stop_worker():
 
 
 def start_worker():
-    """Start the claude-mem worker."""
-    plugin_root = os.path.expanduser(
-        "~/.claude/plugins/cache/thedotmack/claude-mem"
+    """Start the claude-mem worker via bun + worker-cli.js."""
+    marketplace_root = os.path.expanduser(
+        "~/.claude/plugins/marketplaces/thedotmack"
     )
-    # Find the latest version
-    if not os.path.isdir(plugin_root):
-        print("  ERROR: plugin root not found")
+    worker_cli = os.path.join(marketplace_root, "plugin", "scripts", "worker-cli.js")
+
+    if not os.path.isfile(worker_cli):
+        print(f"  ERROR: worker-cli.js not found at {worker_cli}")
         return False
 
-    versions = sorted(os.listdir(plugin_root))
-    if not versions:
-        print("  ERROR: no plugin versions found")
-        return False
-    version = versions[-1]
-    root = os.path.join(plugin_root, version)
+    # Find bun
+    bun = shutil.which("bun")
+    if not bun:
+        bun_home = os.path.expanduser("~/.bun/bin/bun")
+        if os.path.isfile(bun_home):
+            bun = bun_home
+        else:
+            print("  ERROR: bun not found")
+            return False
 
-    bun_runner = os.path.join(root, "scripts", "bun-runner.js")
-    worker_svc = os.path.join(root, "scripts", "worker-service.cjs")
-
-    npm_global_bin = os.path.expanduser("~/npm-global/bin")
+    port = os.environ.get("CLAUDE_MEM_WORKER_PORT", "37777")
     env = os.environ.copy()
-    env["PATH"] = f"{npm_global_bin}:{env.get('PATH', '')}"
-    env["CLAUDE_PLUGIN_ROOT"] = root
+    env["CLAUDE_MEM_WORKER_PORT"] = port
 
-    print(f"  starting worker (plugin v{version})...")
+    print(f"  starting worker (bun + worker-cli.js, port {port})...")
     result = subprocess.run(
-        ["node", bun_runner, worker_svc, "start"],
+        [bun, worker_cli, "start"],
         capture_output=True,
         text=True,
         timeout=30,
+        cwd=marketplace_root,
         env=env,
     )
 
     if result.returncode == 0:
-        try:
-            resp = json.loads(result.stdout.strip())
-            if resp.get("status") == "ready":
-                print("  worker started successfully")
-                return True
-        except json.JSONDecodeError:
-            pass
-        print("  worker started (non-JSON response)")
+        print("  worker started successfully")
         return True
     else:
         print(f"  ERROR starting worker: {result.stderr}")
@@ -221,7 +225,7 @@ def pull_sqlite():
     cfg = load_config()
 
     project_name = cfg["CLAUDE_PROJECT_ID"]
-    canonical_id = hashlib.sha256(project_name.encode()).hexdigest()[:16]
+    canonical_id = resolve_canonical_id(cfg)
     prefix = f"projects/{canonical_id}/sqlite"
     db_path = cfg["CLAUDE_MEM_DB"]
 
@@ -371,7 +375,7 @@ def push_sqlite():
     cfg = load_config()
 
     project_name = cfg["CLAUDE_PROJECT_ID"]
-    canonical_id = hashlib.sha256(project_name.encode()).hexdigest()[:16]
+    canonical_id = resolve_canonical_id(cfg)
     prefix = f"projects/{canonical_id}/sqlite"
     db_path = cfg["CLAUDE_MEM_DB"]
 
@@ -563,7 +567,7 @@ def print_project():
     """Print project identity info."""
     cfg = load_config()
     project_name = cfg["CLAUDE_PROJECT_ID"]
-    canonical_id = hashlib.sha256(project_name.encode()).hexdigest()[:16]
+    canonical_id = resolve_canonical_id(cfg)
     print(f"project_name: {project_name}")
     print(f"canonical_project_id: {canonical_id}")
 
@@ -572,7 +576,7 @@ def doctor():
     """Run diagnostics on the entire sync system."""
     cfg = load_config()
     project_name = cfg["CLAUDE_PROJECT_ID"]
-    canonical_id = hashlib.sha256(project_name.encode()).hexdigest()[:16]
+    canonical_id = resolve_canonical_id(cfg)
     prefix = f"projects/{canonical_id}/sqlite"
     db_path = cfg["CLAUDE_MEM_DB"]
     status = "OK"
