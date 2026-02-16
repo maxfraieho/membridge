@@ -257,6 +257,12 @@ powershell -ExecutionPolicy Bypass -File scripts\bootstrap-windows.ps1
 
 **Auth is NOT synced** — tokens and credentials stay local on each machine.
 
+## Full Deployment Guide
+
+For complete step-by-step instructions to reproduce this environment on a new machine — including system prerequisites, Claude CLI installation, claude-mem plugin setup, MinIO sync configuration, hook integration, ARM performance optimization, multi-machine sync model, and recovery procedures — see:
+
+**[DEPLOYMENT.md](DEPLOYMENT.md)**
+
 ## Ліцензія
 
 MIT
