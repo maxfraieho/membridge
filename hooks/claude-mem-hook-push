@@ -1,0 +1,20 @@
+#!/bin/bash
+# Hook wrapper for Stop — pushes DB to MinIO
+# Fail-open: always exit 0 so Claude CLI session stops cleanly
+set +e
+
+MEMBRIDGE_DIR="${MEMBRIDGE_DIR:-/home/vokov/projects/mem}"
+LOG=~/.claude-mem-minio/hook.log
+
+{
+echo "=== $(date) START push ==="
+set -a
+source "$MEMBRIDGE_DIR/config.env"
+set +a
+export PATH="$HOME/npm-global/bin:$PATH"
+source "$MEMBRIDGE_DIR/venv/bin/activate"
+python "$MEMBRIDGE_DIR/sqlite_minio_sync.py" push_sqlite
+echo "=== $(date) END push rc=$? ==="
+} >> "$LOG" 2>&1
+
+exit 0

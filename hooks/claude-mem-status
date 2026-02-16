@@ -1,0 +1,15 @@
+#!/bin/bash
+# Show sync status — prints project identity + doctor info
+set -euo pipefail
+
+MEMBRIDGE_DIR="${MEMBRIDGE_DIR:-/home/vokov/projects/mem}"
+
+set -a
+source "$MEMBRIDGE_DIR/config.env"
+set +a
+
+source "$MEMBRIDGE_DIR/venv/bin/activate"
+export PATH="$HOME/npm-global/bin:$PATH"
+python "$MEMBRIDGE_DIR/sqlite_minio_sync.py" print_project
+echo
+python "$MEMBRIDGE_DIR/sqlite_minio_sync.py" doctor
