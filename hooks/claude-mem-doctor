@@ -2,7 +2,7 @@
 # Run full diagnostics
 set -euo pipefail
 
-MEMBRIDGE_DIR="${MEMBRIDGE_DIR:-/home/vokov/projects/mem}"
+MEMBRIDGE_DIR="${MEMBRIDGE_DIR:-/home/vokov/membridge}"
 
 set -a
 source "$MEMBRIDGE_DIR/config.env"

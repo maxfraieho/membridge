@@ -3,7 +3,7 @@
 # Fail-open: always exit 0 so Claude CLI session stops cleanly
 set +e
 
-MEMBRIDGE_DIR="${MEMBRIDGE_DIR:-/home/vokov/projects/mem}"
+MEMBRIDGE_DIR="${MEMBRIDGE_DIR:-/home/vokov/membridge}"
 LOG=~/.claude-mem-minio/hook.log
 
 {

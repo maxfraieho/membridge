@@ -4,107 +4,45 @@
 
 ## Що це робить
 
-- **Push**: створює VACUUM-копію `claude-mem.db`, перевіряє integrity, завантажує в MinIO з SHA256 контрольною сумою
-- **Pull**: завантажує DB з MinIO, верифікує SHA256, атомарно замінює локальну копію, перезапускає worker
-- **Lock**: distributed lock на рівні MinIO (один writer одночасно, TTL-based)
-- **canonical_project_id**: SHA256-хеш від `CLAUDE_PROJECT_ID` — не залежить від абсолютного шляху на файловій системі
+- **Push**: VACUUM-копія `claude-mem.db` → SHA256 → завантаження в MinIO
+- **Pull**: завантаження з MinIO → верифікація SHA256 → атомарна заміна локальної DB → перезапуск worker
+- **Lock**: distributed lock на рівні MinIO (один writer, TTL = 2 години)
+- **Hooks**: автоматичний pull при старті сесії Claude CLI, push при завершенні
+- **Backup**: автоматична копія DB перед кожним push
 
 ## Передумови
 
 - [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) встановлений
 - [claude-mem](https://github.com/thedotmack/claude-mem) плагін встановлений (`claude mcp add ...`)
 - Python 3 + pip
-- Доступ до MinIO/S3-сумісного endpoint з створеним bucket
+- Доступ до MinIO/S3-сумісного endpoint з bucket `claude-memory`
 
-## Встановлення (нова машина)
+## Розгортання на новій машині
 
 ```bash
 # 1. Клонувати репо
-git clone git@github.com:maxfraieho/membridge.git
-cd membridge
+git clone git@github.com:maxfraieho/membridge.git ~/membridge
+cd ~/membridge
 
-# 2. Створити virtualenv та встановити залежності
+# 2. Python venv + boto3
 python3 -m venv venv
 source venv/bin/activate
 pip install boto3
 
-# 3. Створити конфігурацію
-cp config.env.example config.env
-# Відредагувати config.env — вказати реальні ключі MinIO:
-#   MINIO_ENDPOINT=https://your-minio.example.com
-#   MINIO_ACCESS_KEY=your-key
-#   MINIO_SECRET_KEY=your-secret
-#   CLAUDE_MEM_DB=/home/YOUR_USER/.claude-mem/claude-mem.db
+# 3. Створити директорії
+mkdir -p ~/.claude-mem-minio/bin ~/.claude-mem-backups
 
-# 4. Перевірити конфігурацію
-source venv/bin/activate
-set -a; source config.env; set +a
-python sqlite_minio_sync.py print_project
-```
+# 4. Конфігурація (секрети — НЕ в git)
+cp config.env.example ~/.claude-mem-minio/config.env
+nano ~/.claude-mem-minio/config.env   # заповнити реальні ключі MinIO
+ln -sf ~/.claude-mem-minio/config.env config.env
 
-Очікуваний вивід:
-```
-project_name: mem
-canonical_project_id: 21c2e59531c8c9ee
-```
-
-> **Важливо**: `canonical_project_id` має бути однаковим на всіх машинах. Він обчислюється як `sha256("mem")[:16]`. Якщо ID не збігається — перевірте `CLAUDE_PROJECT_ID` в `config.env`.
-
-## Налаштування на PRIMARY машині (writer)
-
-PRIMARY — машина, де ведеться основна робота з claude-mem. Вона робить push.
-
-```bash
-# Переконатися, що DB існує
-ls -la ~/.claude-mem/claude-mem.db
-# Типовий розмір: ~2.4MB
-
-# Перший push
-source venv/bin/activate
-set -a; source config.env; set +a
-python sqlite_minio_sync.py push_sqlite
-```
-
-## Налаштування на SECONDARY машині (reader/writer)
-
-SECONDARY — додаткова машина, яка синхронізує DB з MinIO перед сесією.
-
-```bash
-# 1. Встановити claude-mem плагін (якщо ще не встановлений)
-# Дивіться: https://github.com/thedotmack/claude-mem
-
-# 2. Ініціалізувати DB — запустити одну сесію claude, щоб claude-mem створив базу
-claude
-
-# 3. Pull з MinIO
-source venv/bin/activate
-set -a; source config.env; set +a
-python sqlite_minio_sync.py pull_sqlite
-```
-
-## Встановлення hooks (автоматична синхронізація)
-
-Hooks дозволяють автоматично робити pull при старті сесії та push при завершенні.
-
-### 1. Скопіювати hooks
-
-```bash
-mkdir -p ~/.claude-mem-minio/bin
+# 5. Встановити hook-скрипти
 cp hooks/* ~/.claude-mem-minio/bin/
 chmod +x ~/.claude-mem-minio/bin/*
+
+# 6. Claude CLI hooks — додати в ~/.claude/settings.json:
 ```
-
-Якщо membridge встановлений не в `/home/vokov/projects/mem`, встановіть змінну `MEMBRIDGE_DIR`:
-
-```bash
-export MEMBRIDGE_DIR=/path/to/membridge
-```
-
-Або відредагуйте дефолтний шлях у кожному hook-скрипті.
-
-### 2. Налаштувати Claude CLI settings
-
-Додати в `~/.claude/settings.json`:
 
 ```json
 {
@@ -135,88 +73,98 @@ export MEMBRIDGE_DIR=/path/to/membridge
 }
 ```
 
-### 3. Fail-open поведінка
+```bash
+# 7. Shell aliases (додати в ~/.bashrc або ~/.zshrc)
+cat >> ~/.zshrc << 'ALIASES'
 
-Hook-скрипти (`hook-pull`, `hook-push`) завжди завершуються з `exit 0`, навіть якщо sync не вдався. Це гарантує, що Claude CLI сесія запуститься/завершиться нормально. Помилки логуються в `~/.claude-mem-minio/hook.log`.
+# membridge aliases
+alias cm-push="~/.claude-mem-minio/bin/claude-mem-push"
+alias cm-pull="~/.claude-mem-minio/bin/claude-mem-pull"
+alias cm-status="~/.claude-mem-minio/bin/claude-mem-status"
+alias cm-doctor="~/.claude-mem-minio/bin/claude-mem-doctor"
+ALIASES
+source ~/.zshrc
+
+# 8. Перевірка
+~/.claude-mem-minio/bin/claude-mem-doctor
+
+# 9. Перший sync
+cm-pull    # якщо DB вже є на MinIO (на іншій машині вже робили push)
+# або
+cm-push    # якщо ця машина — перша і DB вже є локально
+```
+
+## Оновлення існуючої машини
+
+```bash
+cd ~/membridge
+git pull origin main
+
+# Перевстановити hook-скрипти
+cp hooks/* ~/.claude-mem-minio/bin/
+chmod +x ~/.claude-mem-minio/bin/*
+
+# Оновити залежності
+source venv/bin/activate
+pip install boto3
+
+# Перевірити
+cm-doctor
+```
+
+**Не чіпати при оновленні:** `~/.claude-mem-minio/config.env`, `~/.claude-mem/claude-mem.db`, `~/.claude/settings.json`.
 
 ## Команди
 
 | Команда | Опис |
 |---|---|
-| `python sqlite_minio_sync.py print_project` | Показати project name і canonical_id |
-| `python sqlite_minio_sync.py doctor` | Повна діагностика: MinIO, lock, DB, worker, hooks |
-| `python sqlite_minio_sync.py pull_sqlite` | Завантажити DB з MinIO → замінити локальну |
-| `python sqlite_minio_sync.py push_sqlite` | Створити snapshot → завантажити в MinIO |
+| `cm-push` | Push локальної DB → MinIO |
+| `cm-pull` | Pull MinIO → локальна DB |
+| `cm-doctor` | Повна діагностика (MinIO, lock, DB, worker, hooks) |
+| `cm-status` | Project identity + статус |
 
-Або через wrapper-скрипти з `hooks/`:
-
-```bash
-~/.claude-mem-minio/bin/claude-mem-pull
-~/.claude-mem-minio/bin/claude-mem-push
-~/.claude-mem-minio/bin/claude-mem-doctor
-~/.claude-mem-minio/bin/claude-mem-status
-```
-
-## Безпека
-
-- **НІКОЛИ** не комітьте `config.env` — він містить ключі MinIO
-- **НІКОЛИ** не комітьте `*.db` файли — вони містять всю пам'ять claude-mem
-- `.gitignore` вже налаштований для захисту від випадкового коміту
-- Lock з TTL (за замовчуванням 7200 секунд / 2 години) — захист від одночасного push з двох машин
-- `FORCE_PUSH=1` — для аварійного override lock
-- Рекомендується: один активний Claude CLI одночасно (щоб уникнути конфліктів DB)
-
-## Troubleshooting
-
-### Bucket not found
-
-```
-ERROR: bucket "claude-memory" not found
-```
-
-Створіть bucket в MinIO консолі або через `mc`:
-```bash
-mc mb myminio/claude-memory
-```
-
-### canonical_id mismatch (різний ID на машинах)
-
-Переконайтеся, що `CLAUDE_PROJECT_ID=mem` однаковий в `config.env` на обох машинах. canonical_id обчислюється як:
-
-```python
-hashlib.sha256("mem".encode()).hexdigest()[:16]
-# → "21c2e59531c8c9ee"
-```
-
-### Worker locking DB
-
-Якщо після pull DB повертається до старої версії — worker перезаписує її. Скрипт автоматично зупиняє worker перед заміною та перезапускає після. Якщо проблема зберігається:
+Або напряму через Python:
 
 ```bash
-# Зупинити worker вручну
-kill $(cat ~/.claude-mem/worker.pid | python3 -c "import sys,json; print(json.load(sys.stdin)['pid'])")
+source venv/bin/activate && set -a && source config.env && set +a
+python sqlite_minio_sync.py push_sqlite
+python sqlite_minio_sync.py pull_sqlite
+python sqlite_minio_sync.py doctor
+python sqlite_minio_sync.py print_project
 ```
 
-### MinIO auth errors
+## Порядок роботи з кількома машинами
+
+1. Одночасно активна **тільки одна машина**
+2. Перед переходом на іншу — `cm-push` з поточної
+3. На новій машині — `cm-pull` (або автоматично через SessionStart hook)
+4. Lock захищає від одночасного push (TTL = 2 години)
+5. `FORCE_PUSH=1 cm-push` — аварійний override lock
+
+## Структура файлів
 
 ```
-ERROR: Access Denied
-```
+~/membridge/                         # git repo
+  sqlite_minio_sync.py             # основний sync скрипт
+  hooks/                           # шаблони hook-скриптів
+  config.env.example               # приклад конфігурації
+  config.env -> ~/.claude-mem-minio/config.env  # symlink (не в git)
+  venv/                            # Python virtualenv (не в git)
 
-Перевірте:
-1. `MINIO_ACCESS_KEY` і `MINIO_SECRET_KEY` в `config.env`
-2. Що bucket `claude-memory` існує і доступний для цього користувача
-3. Що endpoint URL правильний (https)
+~/.claude-mem-minio/               # runtime (не в git)
+  config.env                       # секрети MinIO
+  bin/                             # робочі hook-скрипти
+    claude-mem-hook-pull            # SessionStart hook
+    claude-mem-hook-push            # Stop hook (з backup)
+    claude-mem-push                 # ручний push
+    claude-mem-pull                 # ручний pull
+    claude-mem-status               # статус
+    claude-mem-doctor               # діагностика
+  hook.log                         # лог хуків
 
-### Lock active — не вдається push
-
-```
-LOCK ACTIVE — held by orangepi for 1234s
-```
-
-Lock тримається іншою машиною. Дочекайтеся TTL або:
-```bash
-FORCE_PUSH=1 python sqlite_minio_sync.py push_sqlite
+~/.claude-mem/claude-mem.db        # master SQLite DB (не в git)
+~/.claude-mem-backups/             # автоматичні backups (не в git)
+~/.claude/settings.json            # Claude CLI hooks config
 ```
 
 ## Структура в MinIO
@@ -224,46 +172,61 @@ FORCE_PUSH=1 python sqlite_minio_sync.py push_sqlite
 ```
 claude-memory/
   projects/
-    21c2e59531c8c9ee/          # canonical_project_id
+    6fe2e0f6071ac2bb/              # canonical_project_id = sha256("mem")[:16]
       sqlite/
-        claude-mem.db           # SQLite snapshot (~2.4MB)
-        claude-mem.db.sha256    # SHA256 checksum
-        manifest.json           # metadata (host, timestamp, counts)
+        claude-mem.db              # SQLite snapshot
+        claude-mem.db.sha256       # SHA256 checksum
+        manifest.json              # metadata (host, timestamp, counts)
       locks/
-        active.lock             # distributed lock file
+        active.lock                # distributed lock
 ```
+
+## Troubleshooting
+
+**Lock active — не вдається push:**
+```
+LOCK ACTIVE — held by orangepi for 1234s
+```
+Дочекайтеся TTL або: `FORCE_PUSH=1 cm-push`
+
+**canonical_id mismatch:** переконайтесь що `CLAUDE_PROJECT_ID=mem` однаковий в `config.env` на всіх машинах.
+
+**Worker locking DB:** скрипт автоматично зупиняє/перезапускає worker. Якщо проблема — `kill $(cat ~/.claude-mem/worker.pid | python3 -c "import sys,json; print(json.load(sys.stdin)['pid'])")`
+
+**MinIO auth errors:** перевірте ключі в `config.env`, існування bucket, правильність endpoint URL.
+
+## Безпека
+
+- **НІКОЛИ** не комітьте `config.env` — містить ключі MinIO
+- **НІКОЛИ** не комітьте `*.db` — містить всю пам'ять claude-mem
+- `.gitignore` захищає від випадкового коміту
+- Same-host lock re-acquisition: повторний push з того ж хоста без FORCE_PUSH
 
 ## Performance Optimization
 
-This repository includes performance optimization scripts for low-RAM ARM devices (Raspberry Pi, Orange Pi).
+Скрипти оптимізації для ARM-пристроїв з малим обсягом RAM (Raspberry Pi, Orange Pi).
 
-### Files
-
-| File | Purpose |
-|------|---------|
-| `optimization-profile-orange.sh` | Applies sysctl, zram, swap, and memory tuning |
-| `scripts/claude-cleanup-safe` | Docker-safe cleanup of orphan Claude, MCP, bun, and chroma processes |
-
-### Usage
+| Файл | Призначення |
+|------|-------------|
+| `optimization-profile-orange.sh` | sysctl, zram, swap, memory tuning |
+| `scripts/claude-cleanup-safe` | Docker-safe cleanup orphan процесів Claude, MCP, bun, chroma |
 
 ```bash
-# Apply system optimizations (requires root)
+# Застосувати оптимізації (потрібен root)
 sudo bash optimization-profile-orange.sh apply
 
-# Check current optimization status
+# Перевірити статус
 sudo bash optimization-profile-orange.sh status
 
-# Revert all optimizations
+# Відкатити оптимізації
 sudo bash optimization-profile-orange.sh revert
 
-# Preview process cleanup (dry run)
+# Попередній перегляд процесів (dry run)
 scripts/claude-cleanup-safe
 
-# Kill orphan processes (Docker-safe)
+# Зупинити orphan процеси (Docker-safe)
 scripts/claude-cleanup-safe --kill
 ```
-
-These optimizations significantly improve Claude CLI performance on ARM devices with limited RAM (1-2GB).
 
 ## Ліцензія
 
