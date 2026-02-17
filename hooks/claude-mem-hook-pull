@@ -1,6 +1,7 @@
 #!/bin/bash
 # Hook wrapper for SessionStart — pulls DB from MinIO
 # Fail-open: always exit 0 so Claude CLI session starts even on errors
+# Safe mode: does NOT restart worker (worker starts with Claude CLI session)
 set +e
 
 MEMBRIDGE_DIR="${MEMBRIDGE_DIR:-$HOME/membridge}"
@@ -14,6 +15,7 @@ set +a
 "$MEMBRIDGE_DIR/validate-env.sh" || { echo "ENV VALIDATION FAILED"; exit 0; }
 export PATH="$HOME/npm-global/bin:$PATH"
 source "$MEMBRIDGE_DIR/venv/bin/activate"
+export MEMBRIDGE_NO_RESTART_WORKER=1
 python "$MEMBRIDGE_DIR/sqlite_minio_sync.py" pull_sqlite
 echo "=== $(date) END pull rc=$? ==="
 } >> "$LOG" 2>&1

@@ -40,16 +40,14 @@ def load_config():
             sys.exit(1)
         cfg[key] = val
     cfg["MINIO_REGION"] = os.environ.get("MINIO_REGION", "us-east-1")
-    # Optional: explicit canonical ID override (prevents hash recalculation on rename)
-    cfg["CLAUDE_CANONICAL_PROJECT_ID"] = os.environ.get("CLAUDE_CANONICAL_PROJECT_ID", "")
     return cfg
 
 
+NO_RESTART_WORKER = os.getenv("MEMBRIDGE_NO_RESTART_WORKER", "0") == "1"
+
+
 def resolve_canonical_id(cfg):
-    """Return canonical project ID — explicit override or sha256(project_name)[:16]."""
-    explicit = cfg.get("CLAUDE_CANONICAL_PROJECT_ID")
-    if explicit:
-        return explicit
+    """Return canonical project ID — always sha256(project_name)[:16]."""
     return hashlib.sha256(cfg["CLAUDE_PROJECT_ID"].encode()).hexdigest()[:16]
 
 
@@ -342,19 +340,24 @@ def pull_sqlite():
     else:
         print(f"  SHA256 post-replace: OK")
 
-    # --- Restart worker (with sync delay to avoid race) ---
-    print()
-    time.sleep(1)
-    worker_ok = start_worker()
-    # Verify DB was not overwritten by worker
-    time.sleep(2)
-    post_worker_sha = sha256_file(db_path)
-    if post_worker_sha != remote_sha:
-        print(f"  WARNING: worker may have overwritten DB!")
-        print(f"    expected: {remote_sha}")
-        print(f"    got:      {post_worker_sha}")
+    # --- Conditionally restart worker ---
+    worker_ok = None
+    if NO_RESTART_WORKER:
+        print()
+        print("  --no-restart-worker: skipping worker restart (safe mode)")
+        print("  Worker will start automatically with next Claude CLI session.")
     else:
-        print(f"  DB intact after worker start: OK")
+        print()
+        time.sleep(1)
+        worker_ok = start_worker()
+        time.sleep(2)
+        post_worker_sha = sha256_file(db_path)
+        if post_worker_sha != remote_sha:
+            print(f"  WARNING: worker may have overwritten DB!")
+            print(f"    expected: {remote_sha}")
+            print(f"    got:      {post_worker_sha}")
+        else:
+            print(f"  DB intact after worker start: OK")
 
     # --- Final report ---
     print()
@@ -365,7 +368,10 @@ def pull_sqlite():
     print(f"  DB size before:  {db_size_before} bytes")
     print(f"  DB size after:   {db_size_after} bytes")
     print(f"  backup:          {backup_name or 'none'}")
-    print(f"  worker restart:  {'OK' if worker_ok else 'FAILED'}")
+    if worker_ok is None:
+        print(f"  worker restart:  SKIPPED (safe mode)")
+    else:
+        print(f"  worker restart:  {'OK' if worker_ok else 'FAILED'}")
     print(f"  observations:    {obs_count}")
     print(f"  summaries:       {sess_count}")
 

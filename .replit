@@ -10,6 +10,18 @@ packages = ["libxcrypt"]
 localPort = 5000
 externalPort = 80
 
+[[ports]]
+localPort = 8000
+externalPort = 8000
+
+[[ports]]
+localPort = 8011
+externalPort = 3000
+
+[[ports]]
+localPort = 8080
+externalPort = 8080
+
 [env]
 PORT = "5000"
 

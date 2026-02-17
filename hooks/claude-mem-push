@@ -1,5 +1,6 @@
 #!/bin/bash
 # Manual push — interactive, shows output in terminal
+# Usage: claude-mem-push [--project <name>]
 set -euo pipefail
 
 MEMBRIDGE_DIR="${MEMBRIDGE_DIR:-$HOME/membridge}"
@@ -7,6 +8,21 @@ MEMBRIDGE_DIR="${MEMBRIDGE_DIR:-$HOME/membridge}"
 set -a
 source "$MEMBRIDGE_DIR/config.env"
 set +a
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --project)
+      export CLAUDE_PROJECT_ID="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Usage: claude-mem-push [--project <name>]"
+      exit 1
+      ;;
+  esac
+done
+
 "$MEMBRIDGE_DIR/validate-env.sh"
 
 source "$MEMBRIDGE_DIR/venv/bin/activate"
