@@ -1,6 +1,41 @@
-node_modules
-dist
+# Secrets — NEVER commit real credentials
+config.env
+*.env
+!*.env.example
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# SQLite databases and backups
+*.db
+*.db.bak.*
+*.snap.db
+
+# Logs
+*.log
+hook.log
+
+# Temp files
+*.tmp
+*.swp
+*~
+
+# Python venv
+.venv/
+
+# SQLite extras
+*.sqlite
+*.sqlite3
+
+# Claude local state (never commit)
+.claude/plugins/cache/
+.claude/cache/
+.claude-mem/
+.claude-mem-minio/config.env
+.claude-mem-minio/*.log
+
+# OS
 .DS_Store
-server/public
-vite.config.ts.*
-*.tar.gz
