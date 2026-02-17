@@ -7,6 +7,7 @@ MEMBRIDGE_DIR="${MEMBRIDGE_DIR:-$HOME/membridge}"
 set -a
 source "$MEMBRIDGE_DIR/config.env"
 set +a
+"$MEMBRIDGE_DIR/validate-env.sh"
 
 source "$MEMBRIDGE_DIR/venv/bin/activate"
 export PATH="$HOME/npm-global/bin:$PATH"

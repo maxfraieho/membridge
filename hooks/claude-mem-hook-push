@@ -11,10 +11,14 @@ echo "=== $(date) START push ==="
 set -a
 source "$MEMBRIDGE_DIR/config.env"
 set +a
+"$MEMBRIDGE_DIR/validate-env.sh" || { echo "ENV VALIDATION FAILED"; exit 0; }
 export PATH="$HOME/npm-global/bin:$PATH"
 source "$MEMBRIDGE_DIR/venv/bin/activate"
 python "$MEMBRIDGE_DIR/sqlite_minio_sync.py" push_sqlite
 echo "=== $(date) END push rc=$? ==="
+echo "--- cleanup orphan processes ---"
+"$MEMBRIDGE_DIR/scripts/claude-cleanup-safe" --kill 2>&1 || true
+echo "=== $(date) END cleanup ==="
 } >> "$LOG" 2>&1
 
 exit 0

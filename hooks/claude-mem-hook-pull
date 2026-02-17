@@ -11,6 +11,7 @@ echo "=== $(date) START pull ==="
 set -a
 source "$MEMBRIDGE_DIR/config.env"
 set +a
+"$MEMBRIDGE_DIR/validate-env.sh" || { echo "ENV VALIDATION FAILED"; exit 0; }
 export PATH="$HOME/npm-global/bin:$PATH"
 source "$MEMBRIDGE_DIR/venv/bin/activate"
 python "$MEMBRIDGE_DIR/sqlite_minio_sync.py" pull_sqlite
