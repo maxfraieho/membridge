@@ -1,21 +1,21 @@
 """Run both Membridge Control Plane and Agent (dry-run) in a single process."""
 
-import asyncio
 import os
-import uvicorn
 
 os.environ.setdefault("MEMBRIDGE_AGENT_DRYRUN", "1")
+os.environ.setdefault("MEMBRIDGE_DEV", "1")
+
+import uvicorn
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from server.main import app as control_plane_app
 from agent.main import app as agent_app
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
 app = FastAPI(
     title="Membridge",
     description="Membridge Control Plane + Agent (dev mode)",
-    version="0.1.0",
+    version="0.2.0",
 )
 
 app.add_middleware(

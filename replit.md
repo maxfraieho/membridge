@@ -6,58 +6,81 @@ Membridge is a distributed control plane for synchronizing Claude AI memory (cla
 ## Architecture
 
 ### Components
-- **Control Plane** (`server/main.py`) — FastAPI API for managing projects and agents, port 5000
+- **Control Plane** (`server/main.py`) — FastAPI API for managing projects and agents
 - **Agent Daemon** (`agent/main.py`) — FastAPI service running on each machine, executes sync commands
-- **Sync Engine** (`sqlite_minio_sync.py`) — Core Python script for push/pull SQLite ↔ MinIO
+- **Auth** (`server/auth.py`) — Header-based authentication middleware (X-MEMBRIDGE-ADMIN / X-MEMBRIDGE-AGENT)
+- **Jobs** (`server/jobs.py`) — Sync job history stored in SQLite (server/data/jobs.db)
+- **Logging** (`server/logging_config.py`) — Structured JSON logging with request_id
+- **Sync Engine** (`sqlite_minio_sync.py`) — Core Python script for push/pull SQLite to MinIO
 - **Hooks** (`hooks/`) — Bash scripts for Claude CLI lifecycle hooks (SessionStart, Stop)
-- **Bootstrap** (`scripts/`) — Deployment scripts for Linux, Alpine, Windows WSL2
-- **Config Payload** (`claude-home/`) — Claude CLI configuration (skills, hooks, commands) — NOT runtime
+- **Deploy** (`deploy/systemd/`) — Systemd service units for server and agent
 
 ### Running
-- Dev mode: `MEMBRIDGE_AGENT_DRYRUN=1 python -m uvicorn run:app --host 0.0.0.0 --port 5000 --reload`
-- Control Plane only: `python -m uvicorn server.main:app --host 0.0.0.0 --port 5000`
-- Agent only: `MEMBRIDGE_AGENT_DRYRUN=1 python -m uvicorn agent.main:app --host 0.0.0.0 --port 8011`
+- Dev mode: `make dev` (or `MEMBRIDGE_DEV=1 python -m uvicorn run:app --host 0.0.0.0 --port 5000 --reload`)
+- Server only: `make server` (port 8000)
+- Agent only: `make agent` (port 8001)
+- Tests: `make test`
+- Lint: `make lint`
 
 ### API Endpoints
 
-**Control Plane (server/main.py):**
-- `GET /health` — Service health
+**Control Plane (port 8000):**
+- `GET /health` — Service health (no auth)
 - `GET /projects` / `POST /projects` — List/create projects
 - `DELETE /projects/{name}` — Delete project
 - `GET /agents` / `POST /agents` — List/register agents
 - `DELETE /agents/{name}` — Unregister agent
 - `POST /sync/pull` — Trigger pull via agent
 - `POST /sync/push` — Trigger push via agent
+- `GET /jobs` — List sync job history
+- `GET /jobs/{id}` — Get job details
 
-**Agent (agent/main.py):**
-- `GET /health` — Agent health + dry-run status
-- `GET /status?project=...` — Project status on this machine
-- `POST /sync/pull` — Execute pull (subprocess)
-- `POST /sync/push` — Execute push (subprocess)
+**Agent (port 8001):**
+- `GET /health` — Agent health (no auth)
+- `GET /status?project=...` — Project status
+- `POST /sync/pull` — Execute pull
+- `POST /sync/push` — Execute push
 - `GET /doctor?project=...` — Run diagnostics
+
+### Authentication
+- Control Plane: `X-MEMBRIDGE-ADMIN` header == `MEMBRIDGE_ADMIN_KEY` env var
+- Agent: `X-MEMBRIDGE-AGENT` header == `MEMBRIDGE_AGENT_KEY` env var
+- `/health` endpoints are always public
+- `MEMBRIDGE_DEV=1` disables auth entirely
 
 ### Key Concepts
 - `canonical_id` = `sha256(CLAUDE_PROJECT_ID)[:16]` — always computed, never stored separately
 - `MEMBRIDGE_AGENT_DRYRUN=1` — agent returns mock responses without executing real scripts
 - `MEMBRIDGE_NO_RESTART_WORKER=1` — pull does not restart worker (safe default for hooks)
 - All hooks support `--project <name>` parameter for multi-project usage
+- Agent subprocess stdout/stderr limited to 200 lines in API responses
 
 ### Project Structure
 ```
-server/main.py          — FastAPI control plane
-agent/main.py           — FastAPI agent daemon
-run.py                  — Combined dev server (mounts both)
-sqlite_minio_sync.py    — Core sync engine
-hooks/                  — CLI hook scripts
-scripts/                — Bootstrap/deployment scripts
-claude-home/            — Claude CLI config payload
-config.env.example      — MinIO config template
-validate-env.sh         — Environment validation
+server/main.py           — FastAPI control plane
+server/auth.py           — Authentication middleware
+server/jobs.py           — Job history SQLite store
+server/logging_config.py — JSON logging + request_id
+agent/main.py            — FastAPI agent daemon
+run.py                   — Combined dev server (mounts both)
+sqlite_minio_sync.py     — Core sync engine
+hooks/                   — CLI hook scripts
+deploy/systemd/          — Systemd service units
+install.sh               — Linux installer (curl | bash)
+install.ps1              — Windows installer helper
+Makefile                 — dev/test/lint targets
+tests/                   — pytest tests
+config.env.example       — MinIO config template
+validate-env.sh          — Environment validation
+DEPLOYMENT.md            — Full deployment documentation
 ```
 
 ## Recent Changes
-- 2026-02-17: Added Control Plane (server/) and Agent (agent/) FastAPI services
-- 2026-02-17: Removed CLAUDE_CANONICAL_PROJECT_ID concept — canonical_id always computed from project name
-- 2026-02-17: Fixed pull to not restart worker by default (MEMBRIDGE_NO_RESTART_WORKER=1)
-- 2026-02-17: Added --project flag to all hook scripts
-- 2026-02-17: Rewrote validate-env.sh to be portable (no hardcoded paths/values)
+- 2026-02-17: Release-ready: auth, logging, jobs, install scripts, systemd, tests, docs
+- 2026-02-17: Added header-based auth (X-MEMBRIDGE-ADMIN / X-MEMBRIDGE-AGENT)
+- 2026-02-17: Added structured JSON logging with request_id middleware
+- 2026-02-17: Added job history (SQLite) with GET /jobs and GET /jobs/{id}
+- 2026-02-17: Added install.sh (Linux), install.ps1 (Windows), systemd units
+- 2026-02-17: Added Makefile with dev/lint/test targets and 18 pytest tests
+- 2026-02-17: Agent subprocess output limited to 200 lines, passes --project flag
+- 2026-02-17: Updated DEPLOYMENT.md with full documentation

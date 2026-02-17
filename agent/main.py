@@ -1,9 +1,9 @@
 """Membridge Agent Daemon — runs on each machine, executes sync commands."""
 
 import hashlib
+import logging
 import os
 import platform
-import shutil
 import subprocess
 import time
 from enum import Enum
@@ -13,6 +13,14 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from server.auth import AgentAuthMiddleware
+from server.logging_config import RequestIDMiddleware, setup_logging
+
+setup_logging("membridge-agent")
+logger = logging.getLogger("membridge.agent")
+
+MAX_OUTPUT_LINES = 200
+
 DRYRUN = os.environ.get("MEMBRIDGE_AGENT_DRYRUN", "0") == "1"
 HOOKS_BIN = Path(os.environ.get("MEMBRIDGE_HOOKS_BIN", os.path.expanduser("~/.claude-mem-minio/bin")))
 CONFIG_ENV = Path(os.environ.get("MEMBRIDGE_CONFIG_ENV", os.path.expanduser("~/.claude-mem-minio/config.env")))
@@ -20,12 +28,22 @@ CONFIG_ENV = Path(os.environ.get("MEMBRIDGE_CONFIG_ENV", os.path.expanduser("~/.
 app = FastAPI(
     title="Membridge Agent",
     description="Agent daemon for executing Claude memory sync on this machine",
-    version="0.1.0",
+    version="0.2.0",
 )
+
+app.add_middleware(AgentAuthMiddleware)
+app.add_middleware(RequestIDMiddleware)
 
 
 def canonical_id(project_name: str) -> str:
     return hashlib.sha256(project_name.encode()).hexdigest()[:16]
+
+
+def _tail_lines(text: str, max_lines: int = MAX_OUTPUT_LINES) -> str:
+    lines = text.splitlines()
+    if len(lines) <= max_lines:
+        return text
+    return "\n".join([f"... ({len(lines) - max_lines} lines truncated)"] + lines[-max_lines:])
 
 
 def _load_config_env() -> dict[str, str]:
@@ -104,6 +122,7 @@ def _run_sync(action: SyncAction, project: str, extra_env: dict | None = None) -
     cid = canonical_id(project)
 
     if DRYRUN:
+        logger.info("[DRYRUN] %s project=%s canonical_id=%s", action.value, project, cid)
         return SyncResponse(
             ok=True,
             action=action.value,
@@ -130,14 +149,18 @@ def _run_sync(action: SyncAction, project: str, extra_env: dict | None = None) -
     if extra_env:
         env.update(extra_env)
 
+    logger.info("executing %s project=%s script=%s", action.value, project, script)
     try:
         result = subprocess.run(
-            [str(script)],
+            [str(script), "--project", project],
             capture_output=True,
             text=True,
             timeout=120,
             env=env,
         )
+        stdout_tail = _tail_lines(result.stdout) if result.stdout else None
+        stderr_tail = _tail_lines(result.stderr) if result.stderr else None
+        logger.info("%s project=%s rc=%d", action.value, project, result.returncode)
         return SyncResponse(
             ok=result.returncode == 0,
             action=action.value,
@@ -145,11 +168,12 @@ def _run_sync(action: SyncAction, project: str, extra_env: dict | None = None) -
             canonical_id=cid,
             hostname=hostname,
             detail=f"{action.value} {'completed' if result.returncode == 0 else 'failed'}",
-            stdout=result.stdout[-2000:] if result.stdout else None,
-            stderr=result.stderr[-2000:] if result.stderr else None,
+            stdout=stdout_tail,
+            stderr=stderr_tail,
             returncode=result.returncode,
         )
     except subprocess.TimeoutExpired:
+        logger.error("%s project=%s timed out", action.value, project)
         return SyncResponse(
             ok=False,
             action=action.value,
@@ -159,6 +183,7 @@ def _run_sync(action: SyncAction, project: str, extra_env: dict | None = None) -
             detail=f"{action.value} timed out after 120s",
         )
     except Exception as e:
+        logger.exception("failed to execute %s", action.value)
         raise HTTPException(status_code=500, detail=f"Failed to execute {action.value}: {str(e)}")
 
 
@@ -167,7 +192,7 @@ async def health():
     return {
         "status": "ok",
         "service": "membridge-agent",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "hostname": platform.node(),
         "dryrun": DRYRUN,
         "hooks_bin": str(HOOKS_BIN),
@@ -187,41 +212,24 @@ async def status(project: str = Query(..., examples=["garden-seedling"])):
 
     if DRYRUN:
         return StatusResponse(
-            ok=True,
-            project=project,
-            canonical_id=cid,
-            hostname=hostname,
-            detail=f"[DRYRUN] Status for project '{project}'",
-            dryrun=True,
-            config_env_exists=CONFIG_ENV.exists(),
-            hooks_bin_exists=HOOKS_BIN.exists(),
-            db_exists=db_exists,
-            db_path=db_path,
+            ok=True, project=project, canonical_id=cid, hostname=hostname,
+            detail=f"[DRYRUN] Status for project '{project}'", dryrun=True,
+            config_env_exists=CONFIG_ENV.exists(), hooks_bin_exists=HOOKS_BIN.exists(),
+            db_exists=db_exists, db_path=db_path,
         )
 
     if not CONFIG_ENV.exists():
         return StatusResponse(
-            ok=False,
-            project=project,
-            canonical_id=cid,
-            hostname=hostname,
+            ok=False, project=project, canonical_id=cid, hostname=hostname,
             detail=f"config.env not found at {CONFIG_ENV}. Run bootstrap first.",
-            config_env_exists=False,
-            hooks_bin_exists=HOOKS_BIN.exists(),
-            db_exists=db_exists,
-            db_path=db_path,
+            config_env_exists=False, hooks_bin_exists=HOOKS_BIN.exists(),
+            db_exists=db_exists, db_path=db_path,
         )
 
     return StatusResponse(
-        ok=True,
-        project=project,
-        canonical_id=cid,
-        hostname=hostname,
-        detail="Agent ready",
-        config_env_exists=True,
-        hooks_bin_exists=HOOKS_BIN.exists(),
-        db_exists=db_exists,
-        db_path=db_path,
+        ok=True, project=project, canonical_id=cid, hostname=hostname,
+        detail="Agent ready", config_env_exists=True, hooks_bin_exists=HOOKS_BIN.exists(),
+        db_exists=db_exists, db_path=db_path,
     )
 
 
@@ -245,4 +253,4 @@ async def doctor(project: str = Query(..., examples=["garden-seedling"])):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8011)
+    uvicorn.run(app, host="0.0.0.0", port=8001)

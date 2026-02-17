@@ -9,5 +9,7 @@ dependencies = [
     "fastapi>=0.129.0",
     "httpx>=0.28.1",
     "pydantic>=2.12.5",
+    "pytest>=9.0.2",
+    "ruff>=0.15.1",
     "uvicorn>=0.41.0",
 ]

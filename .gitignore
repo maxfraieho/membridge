@@ -1,18 +1,23 @@
 # Secrets — NEVER commit real credentials
 config.env
+.env.server
+.env.agent
 *.env
 !*.env.example
+!config.env.example
 
 # Python
 venv/
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
 
 # SQLite databases and backups
 *.db
 *.db.bak.*
 *.snap.db
+server/data/
 
 # Logs
 *.log
@@ -39,3 +44,7 @@ hook.log
 
 # OS
 .DS_Store
+
+# Node (template leftovers)
+node_modules/
+dist/
