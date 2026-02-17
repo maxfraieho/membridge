@@ -15,7 +15,7 @@ from agent.main import app as agent_app
 app = FastAPI(
     title="Membridge",
     description="Membridge Control Plane + Agent (dev mode)",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 app.add_middleware(

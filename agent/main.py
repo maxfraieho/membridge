@@ -24,11 +24,12 @@ MAX_OUTPUT_LINES = 200
 DRYRUN = os.environ.get("MEMBRIDGE_AGENT_DRYRUN", "0") == "1"
 HOOKS_BIN = Path(os.environ.get("MEMBRIDGE_HOOKS_BIN", os.path.expanduser("~/.claude-mem-minio/bin")))
 CONFIG_ENV = Path(os.environ.get("MEMBRIDGE_CONFIG_ENV", os.path.expanduser("~/.claude-mem-minio/config.env")))
+ALLOW_PROCESS_CONTROL = os.environ.get("MEMBRIDGE_ALLOW_PROCESS_CONTROL", "0") == "1"
 
 app = FastAPI(
     title="Membridge Agent",
     description="Agent daemon for executing Claude memory sync on this machine",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 app.add_middleware(AgentAuthMiddleware)
@@ -192,9 +193,10 @@ async def health():
     return {
         "status": "ok",
         "service": "membridge-agent",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "hostname": platform.node(),
         "dryrun": DRYRUN,
+        "allow_process_control": ALLOW_PROCESS_CONTROL,
         "hooks_bin": str(HOOKS_BIN),
         "config_env": str(CONFIG_ENV),
     }
@@ -249,6 +251,28 @@ async def sync_push(body: SyncRequest):
 @app.get("/doctor")
 async def doctor(project: str = Query(..., examples=["garden-seedling"])):
     return _run_sync(SyncAction.doctor, project)
+
+
+@app.post("/pull", response_model=SyncResponse)
+async def pull_alias(body: SyncRequest):
+    extra_env = {}
+    if body.no_restart_worker:
+        extra_env["MEMBRIDGE_NO_RESTART_WORKER"] = "1"
+    return _run_sync(SyncAction.pull, body.project, extra_env=extra_env)
+
+
+@app.post("/push", response_model=SyncResponse)
+async def push_alias(body: SyncRequest):
+    return _run_sync(SyncAction.push, body.project)
+
+
+class DoctorRequest(BaseModel):
+    project: str = Field(..., examples=["garden-seedling"])
+
+
+@app.post("/doctor", response_model=SyncResponse)
+async def doctor_post(body: DoctorRequest):
+    return _run_sync(SyncAction.doctor, body.project)
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ logger = logging.getLogger("membridge.server")
 app = FastAPI(
     title="Membridge Control Plane",
     description="Centralized API for managing Claude memory sync projects and agents",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 app.add_middleware(AdminAuthMiddleware)
@@ -86,7 +86,7 @@ async def health():
     return {
         "status": "ok",
         "service": "membridge-control-plane",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "projects": len(_projects),
         "agents": len(_agents),
     }
