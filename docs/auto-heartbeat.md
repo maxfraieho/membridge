@@ -91,6 +91,21 @@ curl -s http://127.0.0.1:8000/projects \
 Set `MEMBRIDGE_SERVER_ADMIN_KEY` in `.env.agent`. It is typically the same
 value as `MEMBRIDGE_ADMIN_KEY` on the server.
 
+**Stop hook error: "bun-runner.js not found"**
+
+This is a claude-mem plugin issue, not a membridge-agent issue.  Common on
+ARM64 machines (Orange Pi, Raspberry Pi) and after plugin upgrades.
+
+Run the read-only verifier to diagnose:
+
+```bash
+bash scripts/verify_claude_mem.sh
+```
+
+Exit code tells you what's wrong (10 = stale plugin metadata, 11 = bun missing,
+12 = wrong bun architecture, 13 = bun-runner.js absent).  Full root-cause
+analysis and step-by-step fixes: [`docs/arm64-claude-mem.md`](arm64-claude-mem.md).
+
 **Projects disappear after server restart**
 
 The control-plane stores heartbeat projects in-memory. They reappear after the
