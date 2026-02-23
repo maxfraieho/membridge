@@ -12,6 +12,14 @@ set -a
 source "$MEMBRIDGE_DIR/config.env"
 set +a
 "$MEMBRIDGE_DIR/validate-env.sh" || { echo "ENV VALIDATION FAILED"; exit 0; }
+
+# Best-effort: register project in membridge agent (fail-open, no output on error)
+if [ -n "$CLAUDE_PROJECT_ID" ]; then
+  curl -sf -X POST http://127.0.0.1:8001/register_project \
+    -H "Content-Type: application/json" \
+    -d "{\"project_id\":\"$CLAUDE_PROJECT_ID\"}" \
+    >/dev/null 2>&1 || true
+fi
 export PATH="$HOME/npm-global/bin:$PATH"
 source "$MEMBRIDGE_DIR/venv/bin/activate"
 python "$MEMBRIDGE_DIR/sqlite_minio_sync.py" push_sqlite

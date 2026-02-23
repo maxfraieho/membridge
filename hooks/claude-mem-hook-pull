@@ -13,6 +13,15 @@ set -a
 source "$MEMBRIDGE_DIR/config.env"
 set +a
 "$MEMBRIDGE_DIR/validate-env.sh" || { echo "ENV VALIDATION FAILED"; exit 0; }
+
+# Best-effort: register project in membridge agent (fail-open, no output on error)
+if [ -n "$CLAUDE_PROJECT_ID" ]; then
+  curl -sf -X POST http://127.0.0.1:8001/register_project \
+    -H "Content-Type: application/json" \
+    -d "{\"project_id\":\"$CLAUDE_PROJECT_ID\"}" \
+    >/dev/null 2>&1 || true
+  echo "register_project: $CLAUDE_PROJECT_ID (agent may not be running — ok)"
+fi
 export PATH="$HOME/npm-global/bin:$PATH"
 source "$MEMBRIDGE_DIR/venv/bin/activate"
 export MEMBRIDGE_NO_RESTART_WORKER=1

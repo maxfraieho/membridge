@@ -22,6 +22,20 @@ The browser is redirected automatically to `/static/ui.html`.
 
 Auto-refresh every 10 seconds while a project is selected.
 
+## Auto-population via heartbeat
+
+Projects appear in the sidebar **automatically** once `membridge-agent` is
+running and has registered at least one project. No manual API calls needed:
+
+1. Hooks (`claude-mem-hook-pull` / `claude-mem-hook-push`) call
+   `POST /register_project` on the local agent when a Claude session starts/stops.
+2. The agent's heartbeat loop sends project info to the control-plane every
+   `MEMBRIDGE_HEARTBEAT_INTERVAL_SECONDS` (default: 10 s).
+3. The control-plane stores the project in `_heartbeat_projects`.
+4. `GET /projects` merges manually-created and heartbeat-discovered projects.
+
+See [docs/auto-heartbeat.md](auto-heartbeat.md) for full details and troubleshooting.
+
 ## Authentication
 
 All API calls include the `X-MEMBRIDGE-ADMIN` header.
