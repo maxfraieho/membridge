@@ -9,6 +9,9 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from pydantic import BaseModel, Field
 
 from server.auth import AdminAuthMiddleware
@@ -338,6 +341,17 @@ async def select_leadership(cid: str, body: LeaseSelectRequest):
             f"with PRIMARY_NODE_ID={body.primary_node_id}."
         ),
     }
+
+
+@app.get("/ui", include_in_schema=False)
+async def ui_redirect():
+    """Redirect browser to the web UI."""
+    return RedirectResponse(url="/static/ui.html")
+
+
+_STATIC_DIR = Path(__file__).parent / "static"
+_STATIC_DIR.mkdir(exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
 if __name__ == "__main__":

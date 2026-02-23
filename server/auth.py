@@ -8,7 +8,7 @@ from fastapi import Request, HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
-HEALTH_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
+HEALTH_PATHS = {"/health", "/docs", "/openapi.json", "/redoc", "/ui"}
 
 
 def _is_dev_mode() -> bool:
@@ -19,7 +19,7 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         if _is_dev_mode():
             return await call_next(request)
-        if request.url.path in HEALTH_PATHS:
+        if request.url.path in HEALTH_PATHS or request.url.path.startswith("/static/"):
             return await call_next(request)
         expected = os.environ.get("MEMBRIDGE_ADMIN_KEY", "")
         if not expected:
