@@ -80,6 +80,35 @@ class SyncResponse(BaseModel):
 _projects: dict[str, Project] = {}
 _agents: dict[str, Agent] = {}
 
+# Leadership / node registry (in-memory; populated by heartbeats)
+_nodes: dict[str, "NodeRecord"] = {}
+_leadership_pref: dict[str, str] = {}  # canonical_id → preferred primary_node_id
+
+
+class NodeHeartbeat(BaseModel):
+    node_id: str
+    canonical_id: str
+    obs_count: Optional[int] = None
+    db_sha: Optional[str] = None
+    last_seen: Optional[float] = None
+    ip_addrs: list[str] = []
+
+
+class NodeRecord(BaseModel):
+    node_id: str
+    canonical_id: str
+    role: str = "unknown"
+    obs_count: Optional[int] = None
+    db_sha: Optional[str] = None
+    last_seen: float
+    ip_addrs: list[str] = []
+    registered_at: float
+
+
+class LeaseSelectRequest(BaseModel):
+    primary_node_id: str
+    lease_seconds: Optional[int] = 3600
+
 
 @app.get("/health")
 async def health():
@@ -232,6 +261,83 @@ async def get_job_endpoint(job_id: str):
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     return job
+
+
+@app.post("/agent/heartbeat")
+async def agent_heartbeat(body: NodeHeartbeat):
+    """Register a node heartbeat. Returns the node's current role."""
+    now = time.time()
+    key = f"{body.canonical_id}:{body.node_id}"
+    pref_primary = _leadership_pref.get(body.canonical_id, "")
+    role = "unknown"
+    if pref_primary:
+        role = "primary" if body.node_id == pref_primary else "secondary"
+    existing = _nodes.get(key)
+    _nodes[key] = NodeRecord(
+        node_id=body.node_id,
+        canonical_id=body.canonical_id,
+        role=role,
+        obs_count=body.obs_count,
+        db_sha=body.db_sha,
+        last_seen=body.last_seen or now,
+        ip_addrs=body.ip_addrs,
+        registered_at=existing.registered_at if existing else now,
+    )
+    logger.info(
+        "heartbeat: node=%s canonical_id=%s role=%s obs=%s",
+        body.node_id, body.canonical_id, role, body.obs_count,
+    )
+    return {"ok": True, "role": role, "canonical_id": body.canonical_id}
+
+
+@app.get("/projects/{cid}/nodes", response_model=list[NodeRecord])
+async def list_nodes(cid: str):
+    """List all nodes that have sent heartbeats for this canonical_id."""
+    return [n for n in _nodes.values() if n.canonical_id == cid]
+
+
+@app.get("/projects/{cid}/leadership")
+async def get_leadership(cid: str):
+    """Get current leadership state for a project (from heartbeat registry)."""
+    nodes = [n for n in _nodes.values() if n.canonical_id == cid]
+    pref = _leadership_pref.get(cid)
+    return {
+        "canonical_id": cid,
+        "preferred_primary": pref,
+        "node_count": len(nodes),
+        "nodes": [n.model_dump() for n in nodes],
+    }
+
+
+@app.post("/projects/{cid}/leadership/select")
+async def select_leadership(cid: str, body: LeaseSelectRequest):
+    """Set the preferred primary node for a project.
+
+    ADMIN_KEY protected (via AdminAuthMiddleware).
+    Stores the preference in-memory; nodes adopt roles on next heartbeat/sync.
+    For MinIO lease persistence, nodes read this via heartbeat and write locally.
+    """
+    _leadership_pref[cid] = body.primary_node_id
+    # Update cached roles in node registry
+    for node in _nodes.values():
+        if node.canonical_id == cid:
+            node.role = "primary" if node.node_id == body.primary_node_id else "secondary"
+    logger.info(
+        "leadership select: canonical_id=%s primary=%s lease_seconds=%s",
+        cid, body.primary_node_id, body.lease_seconds,
+    )
+    return {
+        "ok": True,
+        "canonical_id": cid,
+        "primary_node_id": body.primary_node_id,
+        "lease_seconds": body.lease_seconds,
+        "detail": (
+            f"Leadership preference set: primary={body.primary_node_id}. "
+            "Nodes will adopt roles on next heartbeat or sync operation. "
+            "To persist to MinIO: run `sqlite_minio_sync.py leadership_info` on the primary node "
+            f"with PRIMARY_NODE_ID={body.primary_node_id}."
+        ),
+    }
 
 
 if __name__ == "__main__":
