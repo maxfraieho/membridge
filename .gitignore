@@ -28,8 +28,9 @@ hook.log
 *.swp
 *~
 
-# Python venv
+# Python venv (directory and symlink variants)
 .venv/
+venv
 
 # SQLite extras
 *.sqlite
