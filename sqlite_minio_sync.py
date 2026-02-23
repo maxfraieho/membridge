@@ -20,6 +20,20 @@ from botocore.config import Config
 
 LOCK_TTL_SECONDS = int(os.getenv("LOCK_TTL_SECONDS", "7200"))
 FORCE_PUSH = os.getenv("FORCE_PUSH", "0") == "1"
+# Grace period (seconds) after TTL before a foreign lock is stolen.
+# Prevents race: holder might still be finishing when TTL just expired.
+STALE_LOCK_GRACE_SECONDS = int(os.getenv("STALE_LOCK_GRACE_SECONDS", "60"))
+# Pull-overwrite backup retention
+PULL_BACKUP_MAX_DAYS = int(os.getenv("PULL_BACKUP_MAX_DAYS", "14"))
+PULL_BACKUP_MAX_COUNT = int(os.getenv("PULL_BACKUP_MAX_COUNT", "50"))
+
+# Leadership / Primary-Secondary constants
+NODE_ID = os.getenv("MEMBRIDGE_NODE_ID", platform.node())
+PRIMARY_NODE_ID_ENV = os.getenv("PRIMARY_NODE_ID", "")
+ALLOW_SECONDARY_PUSH = os.getenv("ALLOW_SECONDARY_PUSH", "0") == "1"
+ALLOW_PRIMARY_PULL_OVERRIDE = os.getenv("ALLOW_PRIMARY_PULL_OVERRIDE", "0") == "1"
+LEADERSHIP_ENABLED = os.getenv("LEADERSHIP_ENABLED", "1") == "1"
+LEADERSHIP_LEASE_SECONDS = int(os.getenv("LEADERSHIP_LEASE_SECONDS", "3600"))
 
 
 def load_config():
@@ -99,16 +113,25 @@ def acquire_lock(s3, bucket, project_name, canonical_id):
     if exists:
         holder = lock_data.get("hostname", "unknown")
         same_host = holder == platform.node()
-        if age < LOCK_TTL_SECONDS and not FORCE_PUSH and not same_host:
-            print(f"  LOCK ACTIVE — held by {holder} for {age}s (TTL {LOCK_TTL_SECONDS}s)")
-            print(f"  use FORCE_PUSH=1 to override")
-            return False
         if same_host:
             print(f"  re-acquiring own lock (holder={holder}, age={age}s)")
         elif FORCE_PUSH:
-            print(f"  overriding stale/active lock (age={age}s, FORCE_PUSH=1)")
+            print(f"  overriding lock (age={age}s, FORCE_PUSH=1)")
+        elif age < LOCK_TTL_SECONDS:
+            # Lock is active and held by a different host — block.
+            print(f"  LOCK ACTIVE — held by {holder} for {age}s (TTL {LOCK_TTL_SECONDS}s)")
+            print(f"  use FORCE_PUSH=1 to override")
+            return False
+        elif age <= LOCK_TTL_SECONDS + STALE_LOCK_GRACE_SECONDS:
+            # TTL just expired but still within grace window — be conservative.
+            grace_end = LOCK_TTL_SECONDS + STALE_LOCK_GRACE_SECONDS
+            print(f"  LOCK RECENTLY EXPIRED (grace) — held by {holder}, age={age}s")
+            print(f"  Grace period {STALE_LOCK_GRACE_SECONDS}s not exhausted (limit={grace_end}s), blocking")
+            return False
         else:
-            print(f"  lock expired (age={age}s > TTL={LOCK_TTL_SECONDS}s), taking over")
+            # Lock is definitively stale — steal it.
+            print(f"  STALE LOCK — held by {holder}, age={age}s > TTL+grace={LOCK_TTL_SECONDS + STALE_LOCK_GRACE_SECONDS}s")
+            print(f"  Stealing stale lock")
 
     # Write new lock
     lock_body = {
@@ -218,6 +241,283 @@ def start_worker():
         return False
 
 
+def get_remote_manifest(s3, bucket, prefix):
+    """Download and parse remote manifest.json. Returns dict or None."""
+    try:
+        resp = s3.get_object(Bucket=bucket, Key=f"{prefix}/manifest.json")
+        return json.loads(resp["Body"].read().decode())
+    except Exception:
+        return None
+
+
+def get_local_obs_count(db_path):
+    """Query local SQLite for observation count (read-only). Returns int or None."""
+    if not os.path.exists(db_path):
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        count = conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+        conn.close()
+        return count
+    except Exception:
+        return None
+
+
+def create_pull_safety_backup(db_path, local_sha, remote_sha, local_obs, remote_obs, local_ahead):
+    """Create structured backup of local DB before pull overwrite.
+
+    Directory: ~/.claude-mem/backups/pull-overwrite/{YYYYMMDD-HHMMSS}/
+    Contents:  claude-mem.db, chroma.sqlite3 (if present), manifest.json
+
+    Returns the backup directory path.
+    """
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_base = os.path.expanduser("~/.claude-mem/backups/pull-overwrite")
+    backup_dir = os.path.join(backup_base, ts)
+    os.makedirs(backup_dir, exist_ok=True)
+
+    # Copy main DB
+    db_backup = os.path.join(backup_dir, "claude-mem.db")
+    shutil.copy2(db_path, db_backup)
+
+    # Copy vector-db chroma.sqlite3 if it exists
+    chroma_path = os.path.expanduser("~/.claude-mem/vector-db/chroma.sqlite3")
+    if os.path.exists(chroma_path):
+        shutil.copy2(chroma_path, os.path.join(backup_dir, "chroma.sqlite3"))
+
+    # Write manifest so we know what was here and why
+    manifest = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "hostname": platform.node(),
+        "reason": "pull-overwrite safety backup",
+        "local_sha": local_sha,
+        "remote_sha": remote_sha,
+        "local_obs": local_obs,
+        "remote_obs": remote_obs,
+        "local_ahead": local_ahead,
+        "db_path": db_path,
+    }
+    with open(os.path.join(backup_dir, "manifest.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    return backup_dir
+
+
+def cleanup_pull_backups(max_days=None, max_count=None):
+    """Remove old pull-overwrite backups beyond max_days or max_count.
+
+    Keeps at most `max_count` newest snapshots AND removes anything older
+    than `max_days` days.  Runs silently on errors (non-critical path).
+    """
+    if max_days is None:
+        max_days = PULL_BACKUP_MAX_DAYS
+    if max_count is None:
+        max_count = PULL_BACKUP_MAX_COUNT
+
+    backup_base = os.path.expanduser("~/.claude-mem/backups/pull-overwrite")
+    if not os.path.isdir(backup_base):
+        return
+
+    # Sorted oldest → newest
+    dirs = sorted([
+        os.path.join(backup_base, d)
+        for d in os.listdir(backup_base)
+        if os.path.isdir(os.path.join(backup_base, d))
+    ])
+
+    cutoff = time.time() - max_days * 86400
+    removed = 0
+
+    # Remove by age (oldest first)
+    for d in list(dirs):
+        try:
+            if os.path.getmtime(d) < cutoff:
+                shutil.rmtree(d)
+                dirs.remove(d)
+                removed += 1
+        except Exception:
+            pass
+
+    # Remove by count (oldest first if still over limit)
+    while len(dirs) > max_count:
+        try:
+            shutil.rmtree(dirs.pop(0))
+            removed += 1
+        except Exception:
+            break
+
+    if removed:
+        print(f"  backup cleanup: removed {removed} old pull-overwrite snapshot(s)")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Leadership / Primary-Secondary lease  (MinIO best-effort, no CAS)
+# ─────────────────────────────────────────────────────────────────
+
+def get_lease_key(canonical_id):
+    """Return S3 key for the leadership lease."""
+    return f"projects/{canonical_id}/leadership/lease.json"
+
+
+def get_audit_key(canonical_id, node_id):
+    """Return S3 key for a leadership audit log entry."""
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe_node = node_id.replace("/", "_").replace(":", "_")
+    return f"projects/{canonical_id}/leadership/audit/{ts}-{safe_node}.json"
+
+
+def read_lease(s3, bucket, canonical_id):
+    """Read leadership lease from MinIO. Returns dict or None."""
+    try:
+        resp = s3.get_object(Bucket=bucket, Key=get_lease_key(canonical_id))
+        return json.loads(resp["Body"].read().decode())
+    except Exception:
+        return None
+
+
+def write_lease(s3, bucket, canonical_id, primary_node_id, lease_seconds=None,
+                epoch=1, policy="primary_authoritative", needs_ui_selection=False):
+    """Write leadership lease + audit log to MinIO. Returns the lease dict.
+
+    MinIO has no CAS, so this is best-effort. Callers should re-read to verify.
+    """
+    if lease_seconds is None:
+        lease_seconds = LEADERSHIP_LEASE_SECONDS
+    now = int(time.time())
+    lease = {
+        "canonical_id": canonical_id,
+        "primary_node_id": primary_node_id,
+        "issued_at": now,
+        "expires_at": now + lease_seconds,
+        "lease_seconds": lease_seconds,
+        "epoch": epoch,
+        "policy": policy,
+        "issued_by": NODE_ID,
+    }
+    if needs_ui_selection:
+        lease["needs_ui_selection"] = True
+
+    s3.put_object(
+        Bucket=bucket,
+        Key=get_lease_key(canonical_id),
+        Body=json.dumps(lease, indent=2).encode(),
+    )
+
+    # Audit log (non-critical — failure is silently ignored)
+    try:
+        audit_entry = {
+            **lease,
+            "event": "lease_written",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        s3.put_object(
+            Bucket=bucket,
+            Key=get_audit_key(canonical_id, NODE_ID),
+            Body=json.dumps(audit_entry, indent=2).encode(),
+        )
+    except Exception:
+        pass
+
+    return lease
+
+
+def determine_role(s3, bucket, canonical_id):
+    """Determine this node's role as 'primary' or 'secondary'.
+
+    Returns (role, lease, was_created) where:
+      role        — 'primary' | 'secondary'
+      lease       — current lease dict
+      was_created — True if lease was absent/expired and recreated
+
+    Best-effort without CAS: read → maybe write → re-read to verify.
+    """
+    lease = read_lease(s3, bucket, canonical_id)
+    now = int(time.time())
+
+    if lease is None:
+        # No lease — bootstrap a default
+        primary_node = PRIMARY_NODE_ID_ENV if PRIMARY_NODE_ID_ENV else NODE_ID
+        needs_ui = not bool(PRIMARY_NODE_ID_ENV)
+        lease = write_lease(
+            s3, bucket, canonical_id, primary_node,
+            needs_ui_selection=needs_ui,
+        )
+        print(f"  [leadership] no lease found — created default (primary={primary_node})")
+        if needs_ui:
+            print("  [leadership] WARNING: needs_ui_selection=true")
+            print("    Set PRIMARY_NODE_ID env var or use POST /projects/{}/leadership/select".format(canonical_id))
+        role = "primary" if NODE_ID == primary_node else "secondary"
+        return role, lease, True
+
+    expires_at = lease.get("expires_at", 0)
+    primary_node = lease.get("primary_node_id", "")
+
+    if expires_at < now:
+        # Lease expired — try to renew if we are the configured primary
+        if PRIMARY_NODE_ID_ENV and PRIMARY_NODE_ID_ENV == NODE_ID:
+            old_epoch = lease.get("epoch", 1)
+            lease = write_lease(
+                s3, bucket, canonical_id, NODE_ID,
+                epoch=old_epoch + 1,
+            )
+            print(f"  [leadership] lease expired — renewed as primary (epoch={lease['epoch']})")
+            return "primary", lease, True
+
+        # Not our lease to renew — re-read to see if another node wrote a fresh one
+        lease2 = read_lease(s3, bucket, canonical_id)
+        if lease2 and lease2.get("expires_at", 0) >= now:
+            p2 = lease2.get("primary_node_id", "")
+            return ("primary" if NODE_ID == p2 else "secondary"), lease2, False
+
+        # Still expired, not configured as primary → secondary
+        return "secondary", lease, True
+
+    role = "primary" if NODE_ID == primary_node else "secondary"
+    return role, lease, False
+
+
+def leadership_info():
+    """Print leadership lease and this node's current role."""
+    cfg = load_config()
+    canonical_id = resolve_canonical_id(cfg)
+    s3 = get_s3_client(cfg)
+    bucket = cfg["MINIO_BUCKET"]
+
+    print("=== Leadership Lease ===")
+    print(f"  node_id:      {NODE_ID}")
+    print(f"  canonical_id: {canonical_id}")
+    print()
+
+    try:
+        role, lease, was_created = determine_role(s3, bucket, canonical_id)
+        now_ts = int(time.time())
+        expires_at = lease.get("expires_at", 0)
+        issued_at = lease.get("issued_at", 0)
+        ttl = expires_at - now_ts
+
+        print(f"  role:          {role}")
+        print(f"  primary:       {lease.get('primary_node_id', '?')}")
+        print(f"  epoch:         {lease.get('epoch', 1)}")
+        print(f"  policy:        {lease.get('policy', '?')}")
+        print(f"  issued_by:     {lease.get('issued_by', '?')}")
+        if issued_at:
+            print(f"  issued_at:     {datetime.fromtimestamp(issued_at).isoformat()}")
+        print(f"  ttl_remaining: {ttl}s")
+        if was_created:
+            print()
+            print("  NOTE: lease was absent/expired and was recreated.")
+        if lease.get("needs_ui_selection"):
+            print()
+            print("  WARNING: needs_ui_selection=true")
+            print("  Confirm the primary node via:")
+            print(f"    curl -X POST http://SERVER/projects/{canonical_id}/leadership/select \\")
+            print(f"      -H 'Content-Type: application/json' \\")
+            print(f"      -d '{{\"primary_node_id\": \"{NODE_ID}\"}}'")
+    except Exception as e:
+        print(f"  ERROR: {e}")
+        sys.exit(1)
+
+
 def pull_sqlite():
     """Pull SQLite DB from MinIO and atomically replace local copy."""
     cfg = load_config()
@@ -226,6 +526,13 @@ def pull_sqlite():
     canonical_id = resolve_canonical_id(cfg)
     prefix = f"projects/{canonical_id}/sqlite"
     db_path = cfg["CLAUDE_MEM_DB"]
+
+    # Safety-tracking variables (used by local-ahead guard and backup)
+    local_sha = None
+    local_obs = None
+    remote_obs = 0
+    local_ahead = False
+    backup_dir = None
 
     print(f"=== claude-mem MinIO pull sync ===")
     print(f"  project:      {project_name}")
@@ -260,6 +567,36 @@ def pull_sqlite():
             print("  RESULT: already up to date")
             sys.exit(0)
         print("  SHA256 mismatch — pulling remote DB")
+
+        # --- Leadership gate: primary refuses destructive pull overwrite ---
+        if LEADERSHIP_ENABLED:
+            try:
+                role, lease, _ = determine_role(s3, bucket, canonical_id)
+                primary_node = lease.get("primary_node_id", "?")
+                print(f"  [leadership] role={role}  node={NODE_ID}  primary={primary_node}")
+                if role == "primary" and not ALLOW_PRIMARY_PULL_OVERRIDE:
+                    print("  PRIMARY: refusing destructive pull overwrite of local DB.")
+                    print(f"    local_sha:  {local_sha}")
+                    print(f"    remote_sha: {remote_sha}")
+                    print("  Primary is the single source of truth — remote drift must be resolved manually.")
+                    print("  Options:")
+                    print("    - Inspect: download remote DB to a temp path and compare")
+                    print("    - Override (unsafe): ALLOW_PRIMARY_PULL_OVERRIDE=1")
+                    print(f"    - Handover: POST /projects/{canonical_id}/leadership/select")
+                    sys.exit(2)
+            except Exception as _e:
+                print(f"  [leadership] check failed ({_e}) — proceeding without role enforcement")
+
+        # --- Local-ahead guard: compare observation counts before overwrite ---
+        local_obs = get_local_obs_count(db_path)
+        remote_manifest = get_remote_manifest(s3, bucket, prefix)
+        remote_obs = remote_manifest.get("observations", 0) if remote_manifest else 0
+        if local_obs is not None and local_obs > remote_obs:
+            local_ahead = True
+            print(f"  LOCAL AHEAD SUSPECTED: local={local_obs} obs > remote={remote_obs} obs")
+            print(f"  Safety backup will preserve local state before overwrite")
+        else:
+            print(f"  obs check: local={local_obs} remote={remote_obs}")
     else:
         print("  local DB does not exist — pulling remote")
 
@@ -289,13 +626,15 @@ def pull_sqlite():
         sys.exit(1)
     print("  SHA256 verified OK")
 
-    # --- Backup local DB ---
-    backup_name = None
+    # --- Safety backup before overwrite ---
     if os.path.exists(db_path):
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_name = f"{db_path}.bak.{ts}"
-        print(f"[5/7] Backing up local DB → {backup_name}")
-        shutil.copy2(db_path, backup_name)
+        print(f"[5/7] Creating safety backup before overwrite...")
+        backup_dir = create_pull_safety_backup(
+            db_path, local_sha, remote_sha, local_obs, remote_obs, local_ahead
+        )
+        print(f"  backup dir: {backup_dir}")
+        if local_ahead:
+            print(f"  !! LOCAL AHEAD: local data may be newer than remote — backup preserved !!")
     else:
         print("[5/7] No local DB to backup, skipping")
 
@@ -359,6 +698,9 @@ def pull_sqlite():
         else:
             print(f"  DB intact after worker start: OK")
 
+    # --- Cleanup old backups (non-critical, runs silently on errors) ---
+    cleanup_pull_backups()
+
     # --- Final report ---
     print()
     print("=" * 40)
@@ -367,7 +709,9 @@ def pull_sqlite():
     print(f"  canonical_id:    {canonical_id}")
     print(f"  DB size before:  {db_size_before} bytes")
     print(f"  DB size after:   {db_size_after} bytes")
-    print(f"  backup:          {backup_name or 'none'}")
+    print(f"  backup dir:      {backup_dir or 'none'}")
+    if local_ahead:
+        print(f"  LOCAL AHEAD:     YES — check backup before discarding!")
     if worker_ok is None:
         print(f"  worker restart:  SKIPPED (safe mode)")
     else:
@@ -399,6 +743,24 @@ def push_sqlite():
 
     s3 = get_s3_client(cfg)
     bucket = cfg["MINIO_BUCKET"]
+
+    # --- Leadership gate: secondary cannot push ---
+    if LEADERSHIP_ENABLED:
+        try:
+            role, lease, _ = determine_role(s3, bucket, canonical_id)
+            primary_node = lease.get("primary_node_id", "?")
+            print(f"[0/6] Leadership: role={role}  node={NODE_ID}  primary={primary_node}")
+            if role == "secondary" and not ALLOW_SECONDARY_PUSH:
+                print("  SECONDARY: push blocked by default.")
+                print("  Secondary nodes must not push — only the primary is the source of truth.")
+                print("  Options:")
+                print(f"    - Request promotion: POST /projects/{canonical_id}/leadership/select")
+                print("    - Override (unsafe): ALLOW_SECONDARY_PUSH=1")
+                sys.exit(3)
+            print()
+        except Exception as _e:
+            print(f"[0/6] Leadership check failed ({_e}) — proceeding without role enforcement")
+            print()
 
     # --- Stop worker for consistent snapshot ---
     print("[1/6] Stopping worker for consistent snapshot...")
@@ -483,6 +845,13 @@ def push_sqlite():
 
     if remote_sha:
         print("  SHA256 differs — pushing")
+        # --- Pull-before-push guard: warn if remote appears ahead ---
+        remote_manifest = get_remote_manifest(s3, bucket, prefix)
+        if remote_manifest:
+            remote_obs_count = remote_manifest.get("observations", 0)
+            if remote_obs_count > obs_count:
+                print(f"  WARN: remote may be ahead (remote={remote_obs_count} obs vs local={obs_count} obs)")
+                print(f"  Consider running pull first to avoid overwriting newer remote data")
     else:
         print("  pushing new snapshot")
 
@@ -730,6 +1099,29 @@ def doctor():
         print(f"  ERROR reading settings: {e}")
     print()
 
+    # --- Leadership ---
+    print("[+] Leadership")
+    if s3:
+        try:
+            role, lease, was_created = determine_role(s3, bucket, canonical_id)
+            primary_node = lease.get("primary_node_id", "?")
+            expires_at = lease.get("expires_at", 0)
+            ttl = expires_at - int(time.time())
+            print(f"  role:     {role}")
+            print(f"  node_id:  {NODE_ID}")
+            print(f"  primary:  {primary_node}")
+            print(f"  epoch:    {lease.get('epoch', 1)}")
+            print(f"  ttl:      {ttl}s remaining")
+            if was_created:
+                print(f"  NOTE:     lease was recreated (was absent/expired)")
+            if lease.get("needs_ui_selection"):
+                print(f"  WARNING:  needs_ui_selection=true — confirm primary via /leadership/select")
+        except Exception as e:
+            print(f"  WARNING: leadership check failed: {e}")
+    else:
+        print("  UNKNOWN (MinIO unreachable)")
+    print()
+
     # --- Final ---
     print("=" * 44)
     if status == "OK" and hooks_ok:
@@ -747,10 +1139,11 @@ if __name__ == "__main__":
         "push_sqlite": push_sqlite,
         "doctor": doctor,
         "print_project": print_project,
+        "leadership_info": leadership_info,
     }
 
     if len(sys.argv) < 2 or sys.argv[1] not in commands:
-        print("Usage: sqlite_minio_sync.py <pull_sqlite|push_sqlite|doctor|print_project>")
+        print("Usage: sqlite_minio_sync.py <pull_sqlite|push_sqlite|doctor|print_project|leadership_info>")
         sys.exit(1)
 
     commands[sys.argv[1]]()
