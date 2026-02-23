@@ -5,9 +5,16 @@ set -euo pipefail
 
 MEMBRIDGE_DIR="${MEMBRIDGE_DIR:-$HOME/membridge}"
 
+# CLI env overrides config.env
+OV_ALLOW_PRIMARY_PULL_OVERRIDE="${ALLOW_PRIMARY_PULL_OVERRIDE-__unset__}"
+OV_STALE_LOCK_GRACE_SECONDS="${STALE_LOCK_GRACE_SECONDS-__unset__}"
+
 set -a
 source "$MEMBRIDGE_DIR/config.env"
 set +a
+
+[ "$OV_ALLOW_PRIMARY_PULL_OVERRIDE" != "__unset__" ] && export ALLOW_PRIMARY_PULL_OVERRIDE="$OV_ALLOW_PRIMARY_PULL_OVERRIDE"
+[ "$OV_STALE_LOCK_GRACE_SECONDS" != "__unset__" ]    && export STALE_LOCK_GRACE_SECONDS="$OV_STALE_LOCK_GRACE_SECONDS"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
