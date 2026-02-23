@@ -44,6 +44,12 @@ class AgentAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if request.url.path in HEALTH_PATHS:
             return await call_next(request)
+        # Some agent paths are callable from localhost without key (hooks, scripts)
+        _LOCAL_OPEN = {"/register_project", "/projects"}
+        if request.url.path in _LOCAL_OPEN:
+            client_host = request.client.host if request.client else ""
+            if client_host in ("127.0.0.1", "::1", "localhost"):
+                return await call_next(request)
         expected = os.environ.get("MEMBRIDGE_AGENT_KEY", "")
         if not expected:
             return Response(

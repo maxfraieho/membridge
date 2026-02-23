@@ -42,7 +42,10 @@ class ProjectCreate(BaseModel):
 class Project(BaseModel):
     name: str
     canonical_id: str
-    created_at: float
+    created_at: Optional[float] = None
+    last_seen: Optional[float] = None
+    nodes_count: int = 0
+    source: str = "manual"  # "manual" | "heartbeat"
 
 
 class AgentCreate(BaseModel):
@@ -87,6 +90,9 @@ _agents: dict[str, Agent] = {}
 _nodes: dict[str, "NodeRecord"] = {}
 _leadership_pref: dict[str, str] = {}  # canonical_id → preferred primary_node_id
 
+# Projects discovered via agent heartbeats (canonical_id → ProjectHeartbeatRecord)
+_heartbeat_projects: dict[str, dict] = {}
+
 
 class NodeHeartbeat(BaseModel):
     node_id: str
@@ -95,6 +101,9 @@ class NodeHeartbeat(BaseModel):
     db_sha: Optional[str] = None
     last_seen: Optional[float] = None
     ip_addrs: list[str] = []
+    # Optional extensions (added in v0.4):
+    project_id: Optional[str] = None       # human-readable name for this canonical_id
+    agent_version: Optional[str] = None    # agent self-reported version
 
 
 class NodeRecord(BaseModel):
@@ -106,6 +115,7 @@ class NodeRecord(BaseModel):
     last_seen: float
     ip_addrs: list[str] = []
     registered_at: float
+    project_id: Optional[str] = None       # set when agent provides it
 
 
 class LeaseSelectRequest(BaseModel):
@@ -126,7 +136,32 @@ async def health():
 
 @app.get("/projects", response_model=list[Project])
 async def list_projects_endpoint():
-    return list(_projects.values())
+    def _node_count(cid: str) -> int:
+        return sum(1 for n in _nodes.values() if n.canonical_id == cid)
+
+    # Start with manually created projects
+    result: dict[str, Project] = {
+        p.canonical_id: Project(
+            name=p.name,
+            canonical_id=p.canonical_id,
+            created_at=p.created_at,
+            last_seen=_heartbeat_projects.get(p.canonical_id, {}).get("last_seen"),
+            nodes_count=_node_count(p.canonical_id),
+            source="manual",
+        )
+        for p in _projects.values()
+    }
+    # Merge heartbeat-discovered projects (don't override manual ones)
+    for cid, hp in _heartbeat_projects.items():
+        if cid not in result:
+            result[cid] = Project(
+                name=hp["project_id"],
+                canonical_id=cid,
+                last_seen=hp.get("last_seen"),
+                nodes_count=_node_count(cid),
+                source="heartbeat",
+            )
+    return list(result.values())
 
 
 @app.post("/projects", response_model=Project, status_code=201)
@@ -285,10 +320,19 @@ async def agent_heartbeat(body: NodeHeartbeat):
         last_seen=body.last_seen or now,
         ip_addrs=body.ip_addrs,
         registered_at=existing.registered_at if existing else now,
+        project_id=body.project_id,
     )
+    # Register project from heartbeat if agent provided a project_id
+    if body.project_id:
+        _heartbeat_projects[body.canonical_id] = {
+            "project_id": body.project_id,
+            "canonical_id": body.canonical_id,
+            "last_seen": now,
+            "node_id": body.node_id,
+        }
     logger.info(
-        "heartbeat: node=%s canonical_id=%s role=%s obs=%s",
-        body.node_id, body.canonical_id, role, body.obs_count,
+        "heartbeat: node=%s canonical_id=%s project=%s role=%s obs=%s",
+        body.node_id, body.canonical_id, body.project_id or "-", role, body.obs_count,
     )
     return {"ok": True, "role": role, "canonical_id": body.canonical_id}
 
