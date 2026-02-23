@@ -199,46 +199,68 @@ def stop_worker():
 
 
 def start_worker():
-    """Start the claude-mem worker via bun + worker-cli.js."""
-    marketplace_root = os.path.expanduser(
-        "~/.claude/plugins/marketplaces/thedotmack"
-    )
-    worker_cli = os.path.join(marketplace_root, "plugin", "scripts", "worker-cli.js")
+    """Start the claude-mem worker as a fully-detached daemon.
 
-    if not os.path.isfile(worker_cli):
-        print(f"  ERROR: worker-cli.js not found at {worker_cli}")
+    Bun crashes with EINVAL (Fix #646) when it inherits pipe fds from the
+    Claude Code hook system.  We work around this by:
+      1. Spawning worker-service.cjs via setsid so it is a new session leader
+         with all stdio redirected to /dev/null — no inherited pipes.
+      2. Polling the HTTP health endpoint to confirm readiness instead of
+         waiting for the spawned process to exit (it runs as a server).
+    """
+    plugin_root = os.path.expanduser(
+        "~/.claude/plugins/cache/thedotmack/claude-mem/10.3.3"
+    )
+    worker_service = os.path.join(plugin_root, "scripts", "worker-service.cjs")
+
+    if not os.path.isfile(worker_service):
+        print(f"  ERROR: worker-service.cjs not found at {worker_service}")
         return False
 
-    # Find bun
-    bun = shutil.which("bun")
-    if not bun:
-        bun_home = os.path.expanduser("~/.bun/bin/bun")
-        if os.path.isfile(bun_home):
-            bun = bun_home
-        else:
-            print("  ERROR: bun not found")
-            return False
+    bun = shutil.which("bun") or os.path.expanduser("~/.bun/bin/bun")
+    if not os.path.isfile(bun) and not shutil.which("bun"):
+        print("  ERROR: bun not found")
+        return False
 
     port = os.environ.get("CLAUDE_MEM_WORKER_PORT", "37777")
     env = os.environ.copy()
     env["CLAUDE_MEM_WORKER_PORT"] = port
 
-    print(f"  starting worker (bun + worker-cli.js, port {port})...")
-    result = subprocess.run(
-        [bun, worker_cli, "start"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        cwd=marketplace_root,
-        env=env,
-    )
+    print(f"  starting worker (bun worker-service.cjs --daemon, port {port})...")
 
-    if result.returncode == 0:
-        print("  worker started successfully")
-        return True
-    else:
-        print(f"  ERROR starting worker: {result.stderr}")
-        return False
+    devnull = open(os.devnull, "rb")
+    try:
+        proc = subprocess.Popen(
+            [bun, worker_service, "--daemon"],
+            stdin=devnull,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+            env=env,
+        )
+    finally:
+        devnull.close()
+
+    # Poll health endpoint until ready (max 15 s)
+    import urllib.request
+    url = f"http://127.0.0.1:{port}/api/readiness"
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        time.sleep(0.5)
+        try:
+            with urllib.request.urlopen(url, timeout=1) as resp:
+                if resp.status == 200:
+                    print("  worker started successfully")
+                    return True
+        except Exception:
+            pass
+        if proc.poll() is not None and proc.returncode not in (0, None):
+            print(f"  ERROR starting worker: daemon exited {proc.returncode}")
+            return False
+
+    print("  ERROR starting worker: readiness timeout after 15s")
+    return False
 
 
 def get_remote_manifest(s3, bucket, prefix):
