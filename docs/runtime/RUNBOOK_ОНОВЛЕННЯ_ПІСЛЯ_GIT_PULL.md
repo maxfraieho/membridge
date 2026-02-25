@@ -31,20 +31,134 @@ Membridge CP: Python/FastAPI на :8000
 
 Щойно виконано `git pull` з оновленнями від Replit. Твоє завдання:
 
-1. ОНОВИТИ СИСТЕМУ — встановити залежності, мігрувати БД, зібрати production bundle
-2. ПРОТЕСТУВАТИ — перевірити всі ключові endpoints та UI
-3. ПЕРЕВІРИТИ КОНВЕЄР — переконатись що весь pipeline працює
-4. УСУНУТИ ПРОБЛЕМИ — якщо щось не працює, виправити та повідомити
+1. ПЕРЕВІРИТИ ПЕРЕДУМОВИ — PostgreSQL повинен працювати локально, DATABASE_URL повинен бути в /etc/bloom-runtime.env
+2. ОНОВИТИ СИСТЕМУ — встановити залежності, мігрувати БД, зібрати production bundle
+3. ПРОТЕСТУВАТИ — перевірити всі ключові endpoints та UI
+4. ПЕРЕВІРИТИ КОНВЕЄР — переконатись що весь pipeline працює
+5. УСУНУТИ ПРОБЛЕМИ — якщо щось не працює, виправити та повідомити
+
+ВАЖЛИВО: Нова збірка (починаючи з commit 150b491) вимагає PostgreSQL.
+Стара збірка працювала на in-memory storage — нова використовує DatabaseStorage (Drizzle ORM + PostgreSQL).
+Якщо DATABASE_URL відсутній в /etc/bloom-runtime.env — сервіс НЕ стартує.
+Спочатку виконай "Крок 0: Підготовка PostgreSQL" з runbook.
 
 ІНВАРІАНТИ (НІКОЛИ не порушуй):
 - НЕ модифікуй sqlite_minio_sync.py
 - НЕ змішуй два шари пам'яті: claude-mem.db (Membridge/MinIO) та DiffMem/git
-- НЕ видаляй та не змінюй /etc/bloom-runtime.env
+- НЕ видаляй та не змінюй існуючі рядки /etc/bloom-runtime.env (тільки ДОДАВАЙ нові)
 - НЕ видаляй дані з PostgreSQL без явної необхідності
 - НЕ показуй значення секретів у виводі
+- НЕ використовуй Replit/Neon DATABASE_URL — тільки локальний PostgreSQL
 
 Виконай кроки нижче послідовно. При помилці — зупинись, повідом причину, запропонуй рішення.
+Документ: docs/runtime/RUNBOOK_ОНОВЛЕННЯ_ПІСЛЯ_GIT_PULL.md
 ````
+
+---
+
+## Крок 0: Підготовка PostgreSQL (одноразово, при першому оновленні)
+
+> **Цей крок потрібен ТІЛЬКИ якщо PostgreSQL ще не налаштований на сервері.**
+> Попередня збірка (до commit 150b491) працювала на in-memory storage.
+> Нова збірка вимагає PostgreSQL — без `DATABASE_URL` сервіс НЕ стартує.
+
+### 0.1 Перевірити чи PostgreSQL вже є
+
+```bash
+# Перевірити чи PostgreSQL встановлений
+which psql && psql --version
+
+# Перевірити чи сервіс запущений
+sudo rc-service postgresql status 2>/dev/null || echo "PostgreSQL не встановлений"
+
+# Перевірити чи DATABASE_URL є в bloom-runtime.env
+grep DATABASE_URL /etc/bloom-runtime.env 2>/dev/null || echo "DATABASE_URL ВІДСУТНІЙ"
+```
+
+Якщо PostgreSQL запущений і DATABASE_URL є — переходь до Кроку 1.
+
+### 0.2 Встановити PostgreSQL (якщо відсутній)
+
+```bash
+# Alpine Linux
+sudo apk add postgresql postgresql-client postgresql-contrib
+
+# Ініціалізувати кластер
+sudo /etc/init.d/postgresql setup
+
+# Запустити
+sudo rc-service postgresql start
+sudo rc-update add postgresql default    # автозапуск при boot
+```
+
+### 0.3 Створити базу та користувача
+
+```bash
+# Створити користувача bloom з паролем
+sudo -u postgres createuser -P bloom
+# (введіть надійний пароль, запам'ятайте його)
+
+# Створити базу
+sudo -u postgres createdb -O bloom bloom_runtime
+
+# Перевірити підключення
+psql -U bloom -d bloom_runtime -h 127.0.0.1 -c "SELECT 1"
+```
+
+### 0.4 Додати DATABASE_URL в bloom-runtime.env
+
+```bash
+# ЗАМІНІТЬ <password> на реальний пароль, створений вище
+sudo sh -c 'echo "DATABASE_URL=postgresql://bloom:<password>@127.0.0.1:5432/bloom_runtime" >> /etc/bloom-runtime.env'
+
+# Перевірити
+grep DATABASE_URL /etc/bloom-runtime.env
+```
+
+### 0.5 Створити таблиці
+
+```bash
+cd /home/vokov/membridge
+source /etc/bloom-runtime.env
+npx drizzle-kit push
+```
+
+**Очікуваний результат:**
+```
+Changes applied successfully
+```
+
+Будуть створені таблиці: `llm_tasks`, `leases`, `workers`, `runtime_artifacts`, `llm_results`, `audit_logs`, `runtime_settings`, `users`.
+
+### 0.6 Перевірити
+
+```bash
+source /etc/bloom-runtime.env
+psql $DATABASE_URL -c "\dt"
+```
+
+Повинні бути видимі всі 8 таблиць.
+
+### Схема підключення (нова vs стара збірка)
+
+```
+СТАРА ЗБІРКА (до commit 150b491):
+┌──────────────┐
+│ bloom-runtime│
+│              │ ← MemStorage (в пам'яті)
+│ Express :5000│ ← Дані зникають при рестарті
+└──────────────┘
+
+НОВА ЗБІРКА (після commit 150b491):
+┌──────────────┐      ┌──────────────┐
+│ bloom-runtime│      │  PostgreSQL  │
+│              │─────▶│  :5432       │
+│ Express :5000│      │  bloom_runtime│
+└──────────────┘      └──────────────┘
+                      ← DatabaseStorage
+                      ← Дані переживають рестарт
+                      ← DATABASE_URL обов'язковий
+```
 
 ---
 

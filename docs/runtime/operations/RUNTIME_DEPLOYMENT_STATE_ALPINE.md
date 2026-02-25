@@ -77,6 +77,15 @@ dg-publish: true
 └─────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐
+│              PostgreSQL :5432 (локальний)                │
+│    bloom_runtime database (Drizzle ORM)                 │
+│    8 tables: llm_tasks, leases, workers,                │
+│    runtime_artifacts, llm_results, audit_logs,          │
+│    runtime_settings, users                              │
+│    connected via DATABASE_URL в /etc/bloom-runtime.env  │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
 │                   MinIO :9000                           │
 │            object storage (separate service)            │
 │     connected via membridge memory sync (SQLite→S3)     │
@@ -91,6 +100,7 @@ dg-publish: true
 | 5000 | bloom-runtime | Express API + React SPA | Running |
 | 8000 | membridge control plane | Worker registry, agent coordination | Running |
 | 8001 | Python (unidentified) | Unknown second Python service | Running |
+| 5432 | PostgreSQL | bloom_runtime database (локальний) | Running |
 | 9000 | MinIO | Object storage | Running |
 | 22 | sshd | SSH access | Running |
 
@@ -132,7 +142,7 @@ after: firewall
 | `PORT` | Listening port | `5000` |
 | `MEMBRIDGE_SERVER_URL` | Membridge control plane URL | `http://127.0.0.1:8000` |
 | `MEMBRIDGE_ADMIN_KEY` | Admin auth key for membridge | `<secret, never logged>` |
-| `DATABASE_URL` | PostgreSQL connection string | `postgresql://user:pass@host/db` |
+| `DATABASE_URL` | PostgreSQL connection string (локальний) | `postgresql://bloom:pass@127.0.0.1:5432/bloom_runtime` |
 | `RUNTIME_API_KEY` | API key for `/api/runtime/*` routes | `<secret>` (optional; if unset, auth skipped) |
 
 **Note:** `MEMBRIDGE_ADMIN_KEY` ніколи не з'являється в логах. API повертає masked версію: `xxxx****xxxx`.
