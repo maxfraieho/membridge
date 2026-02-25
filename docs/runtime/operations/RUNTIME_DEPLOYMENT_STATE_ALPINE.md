@@ -6,6 +6,8 @@ tags:
   - authority:production
 created: 2026-02-25
 updated: 2026-02-25
+changelog:
+  - 2026-02-25 (rev 2): Updated — GAP-1 (persistence) and GAP-2 (auth) resolved by Replit commit 150b491
 title: "RUNTIME_DEPLOYMENT_STATE_ALPINE"
 dg-publish: true
 ---
@@ -48,9 +50,14 @@ dg-publish: true
 │  │   dist/public/) │   │                          │    │
 │  └─────────────────┘   └──────────┬───────────────┘    │
 │                                   │ membridgeFetch()    │
-│  ┌────────────────────────────────▼──────────────────┐  │
-│  │         MemStorage (in-memory)                    │  │
-│  │  tasks / leases / workers / artifacts / audit     │  │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │   runtimeAuthMiddleware (X-RUNTIME-API-KEY)       │  │
+│  └──────────────────────┬────────────────────────────┘  │
+│                         │                               │
+│  ┌──────────────────────▼────────────────────────────┐  │
+│  │       DatabaseStorage (PostgreSQL via Drizzle)     │  │
+│  │  tasks / leases / workers / artifacts / audit      │  │
+│  │  runtime_settings (persistent config)              │  │
 │  └───────────────────────────────────────────────────┘  │
 └───────────────────────┬─────────────────────────────────┘
                         │ HTTP + X-MEMBRIDGE-ADMIN header
@@ -125,6 +132,8 @@ after: firewall
 | `PORT` | Listening port | `5000` |
 | `MEMBRIDGE_SERVER_URL` | Membridge control plane URL | `http://127.0.0.1:8000` |
 | `MEMBRIDGE_ADMIN_KEY` | Admin auth key for membridge | `<secret, never logged>` |
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://user:pass@host/db` |
+| `RUNTIME_API_KEY` | API key for `/api/runtime/*` routes | `<secret>` (optional; if unset, auth skipped) |
 
 **Note:** `MEMBRIDGE_ADMIN_KEY` ніколи не з'являється в логах. API повертає masked версію: `xxxx****xxxx`.
 
@@ -177,7 +186,7 @@ sudo nginx -t && sudo nginx -s reload
 
 Base path: `/api/runtime/`
 Served by: bloom-runtime on `:5000` (also via nginx on `:80`)
-Auth: **none** (see Security section)
+Auth: `X-RUNTIME-API-KEY` header middleware (if `RUNTIME_API_KEY` env var set)
 
 ### Endpoints — Full List
 
@@ -281,42 +290,38 @@ Waiting for worker registration to become active.
 
 ## E. Storage Model
 
-### Current Implementation: MemStorage
+### Current Implementation: DatabaseStorage ✅ (resolved 2026-02-25)
 
-Class: `MemStorage` in `server/storage.ts`
-Persistence: **none** — all data in Node.js process heap
+Class: `DatabaseStorage` in `server/storage.ts`
+Driver: Drizzle ORM + `@neondatabase/serverless` (PostgreSQL)
+Persistence: **full** — all data written to PostgreSQL
 
 ```typescript
-// All state lives here, lost on process exit
-private users:     Map<string, User>
-private workers:   Map<string, WorkerNode>
-private tasks:     Map<string, LLMTask>
-private leases:    Map<string, Lease>
-private artifacts: Map<string, RuntimeArtifact>
-private results:   Map<string, LLMResult>
-private auditLogs: AuditLogEntry[]
-private runtimeConfig: { membridge_server_url, admin_key, connected, last_test }
+// All state persists across restarts via PostgreSQL
+// Tables: llm_tasks, leases, workers, runtime_artifacts,
+//         llm_results, audit_logs, runtime_settings, users
 ```
 
-### Consequences of In-Memory Storage
+### Consequences of PostgreSQL Storage
 
 | Event | Consequence |
 |-------|-------------|
-| `rc-service bloom-runtime restart` | All tasks, leases, workers, audit logs **lost** |
-| Server crash | Same as restart |
-| Node.js OOM | Same as restart |
-| Machine reboot | Service auto-restarts (OpenRC default), state **lost** |
-| `MEMBRIDGE_ADMIN_KEY` reload | Requires restart — config re-read only at startup |
+| `rc-service bloom-runtime restart` | State **preserved** in PostgreSQL |
+| Server crash | State preserved; in-flight runs recovered via lease expiry |
+| Node.js OOM | State preserved |
+| Machine reboot | Service auto-restarts (OpenRC default), state **intact** |
+| `MEMBRIDGE_ADMIN_KEY` update | Persisted in `runtime_settings` table via `POST /api/runtime/config` |
 
-**Operational implication:** bloom-runtime is currently **stateless across restarts**. It cannot replay tasks, recover in-progress runs, or preserve audit history.
+**Operational implication:** bloom-runtime is now **stateful across restarts**. Tasks, leases, audit history, and config survive service restarts.
 
-### Missing Layer: Persistence
+### Key Design Notes
 
-The schema is fully defined (`shared/schema.ts`, Drizzle ORM + `drizzle.config.ts`).
-PostgreSQL tables exist as type definitions.
-What is missing: a `DatabaseStorage` implementation replacing `MemStorage`.
+- Workers remain registered via heartbeat polling — not permanently stored
+- `DatabaseStorage.init()` runs on startup to load config from `runtime_settings`
+- `upsertWorker()` uses `ON CONFLICT DO UPDATE` to handle re-registration
+- Timestamps stored as Unix epoch milliseconds (bigint) for consistency with previous MemStorage API contract
 
-See: [[RUNTIME_GAPS_AND_NEXT_STEPS.md#persistence-layer]]
+See: [[RUNTIME_BACKEND_IMPLEMENTATION_STATE.md]] — full implementation detail
 
 ---
 
@@ -326,8 +331,8 @@ See: [[RUNTIME_GAPS_AND_NEXT_STEPS.md#persistence-layer]]
 
 | Control | Status | Notes |
 |---------|--------|-------|
-| Authentication on `/api/runtime/*` | ❌ **absent** | All endpoints publicly accessible |
-| Authorization / RBAC | ❌ **absent** | No role checks |
+| Authentication on `/api/runtime/*` | ✅ **present** | `X-RUNTIME-API-KEY` header, timing-safe comparison; skipped if env var unset |
+| Authorization / RBAC | ❌ **absent** | No role checks (single key covers all operations) |
 | Rate limiting | ❌ **absent** | `express-rate-limit` in deps, not wired |
 | Input validation | ✅ Present | Zod schemas on POST bodies |
 | Admin key in logs | ✅ Masked | Returns `xxxx****xxxx` in API responses |
@@ -354,10 +359,10 @@ See: [[RUNTIME_GAPS_AND_NEXT_STEPS.md#persistence-layer]]
 
 | Dimension | Score | Assessment |
 |-----------|-------|-----------|
-| **Architecture readiness** | 8/10 | Core architecture sound: Express + Vite + Membridge proxy pattern correct. Lease/task state machines complete. Worker selection with sticky routing implemented. Missing: persistence, auth middleware hooks. |
-| **Execution readiness** | 4/10 | Pipeline implemented end-to-end in code, but cannot execute tasks because 0 workers registered. One worker registration makes the entire pipeline operational. |
-| **Operational readiness** | 6/10 | Service auto-starts on boot (OpenRC default runlevel), logs in place, nginx proxy configured, env file secured. Missing: log rotation, health check endpoint (only `/` returns 200), alerting. |
-| **Production readiness** | 3/10 | Not production-ready as-is. Critical gaps: no persistence (state lost on restart), no auth on API, no TLS, no rate limiting. Suitable for internal/development use behind a trusted network. |
+| **Architecture readiness** | 9/10 | Core architecture sound. Persistence (PostgreSQL), auth middleware, hardened membridgeFetch with retries/backoff now in place. Remaining gap: Membridge UI not yet integrated into main frontend. |
+| **Execution readiness** | 4/10 | Pipeline implemented end-to-end. Still blocked by 0 workers registered. One worker registration makes the entire pipeline operational. |
+| **Operational readiness** | 7/10 | Service auto-starts on boot, logs in place, nginx configured, env secured, state now survives restarts. Missing: log rotation, rate limiting, alerting. |
+| **Production readiness** | 6/10 | GAP-1 (persistence) and GAP-2 (auth) resolved. Remaining gaps: no TLS, no rate limiting, no workers registered, Membridge UI not integrated. Suitable for internal production use on trusted network. |
 
 ---
 

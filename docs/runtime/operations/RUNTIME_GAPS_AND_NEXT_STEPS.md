@@ -6,6 +6,8 @@ tags:
   - authority:production
 created: 2026-02-25
 updated: 2026-02-25
+changelog:
+  - 2026-02-25 (rev 2): GAP-1 and GAP-2 marked RESOLVED (Replit commit 150b491). GAP-7 added (Membridge UI integration).
 title: "RUNTIME_GAPS_AND_NEXT_STEPS"
 dg-publish: true
 ---
@@ -30,61 +32,31 @@ Reference: [[RUNTIME_DEPLOYMENT_STATE_ALPINE.md]] — baseline deployment state.
 
 ## Critical Gaps
 
-### GAP-1: Persistence Layer Missing
+### GAP-1: Persistence Layer Missing — ✅ RESOLVED (2026-02-25)
 
-**Severity:** Critical
-**Impact:** All runtime state lost on service restart
+**Resolved in:** Replit commit `150b491` — "Add persistent storage and authentication to the runtime"
 
-**Current state:**
-- `MemStorage` class — all data in Node.js process heap
-- `Map<string, Task>`, `Map<string, Lease>`, `Map<string, WorkerNode>`, etc.
-- No database connection
+**Resolution summary:**
+- `DatabaseStorage` class implemented in `server/storage.ts` using Drizzle ORM + `@neondatabase/serverless`
+- Replaces `MemStorage` — same `IStorage` interface, fully compatible
+- All entities persisted: tasks, leases, artifacts, results, audit logs, runtime config
+- Config (membridge URL, admin key) now persisted to `runtime_settings` table and loaded on startup
 
-**What is lost on restart:**
-- All queued, running, and completed tasks
-- All active leases (in-progress runs interrupted silently)
-- All registered worker state
-- All artifacts and results
-- Audit log history
-
-**What exists but is unused:**
-- `drizzle.config.ts` — Drizzle ORM config pointing to PostgreSQL
-- `shared/schema.ts` — full PostgreSQL table definitions (`pgTable`) for all entities
-- `pg` package in dependencies — PostgreSQL client installed
-
-**Gap:** `DatabaseStorage` class implementing `IStorage` interface — not built.
-
-**Resolution:** Implement `DatabaseStorage` using the existing schema, replace `MemStorage` import in `server/storage.ts`. The `IStorage` interface is fully defined — implementation is a mechanical task.
+**See:** [[RUNTIME_BACKEND_IMPLEMENTATION_STATE.md]] for full implementation detail.
 
 ---
 
-### GAP-2: Runtime API Has No Authentication
+### GAP-2: Runtime API Has No Authentication — ✅ RESOLVED (2026-02-25)
 
-**Severity:** Critical (for public exposure)
-**Impact:** All `/api/runtime/*` endpoints publicly accessible without credentials
+**Resolved in:** Replit commit `150b491` — "Add persistent storage and authentication to the runtime"
 
-**Current state:**
-- No authentication middleware on any route
-- Any client with network access can:
-  - Read all tasks, leases, audit logs
-  - Create tasks and consume worker capacity
-  - Modify membridge URL and admin key via `POST /api/runtime/config`
-  - Trigger test-connection (consuming rate limits)
+**Resolution summary:**
+- `server/middleware/runtimeAuth.ts` implemented — `X-RUNTIME-API-KEY` header, timing-safe comparison
+- Applied to all `/api/runtime/*` routes via `app.use("/api/runtime", runtimeAuthMiddleware)`
+- Key read from `RUNTIME_API_KEY` env var; middleware is passthrough if env var unset (dev mode)
+- Unprotected paths: `/api/runtime/health`, `/api/runtime/test-connection`
 
-**What exists:**
-- `passport` + `passport-local` in dependencies
-- `express-session` + `memorystore` in dependencies
-- `auth.py` exists in `server/` (Python — not the Node.js auth layer)
-- User model defined in `shared/schema.ts`
-
-**Gap:** Express middleware chain for authentication not wired to `/api/runtime/*` routes.
-
-**Resolution options (choose one):**
-1. **Simple shared secret** — `X-BLOOM-API-KEY` header middleware, key from env var. Minimal implementation, fast.
-2. **Session-based auth** — use existing `passport-local` + `express-session` setup. Full login UI.
-3. **JWT** — stateless, compatible with worker-to-runtime calls.
-
-Recommended starting point: **option 1** (shared secret) — unblocks production use in hours, not days.
+**New env var required:** `RUNTIME_API_KEY` in `/etc/bloom-runtime.env`
 
 ---
 
@@ -182,20 +154,51 @@ Requires: domain name, `certbot` (`apk add certbot certbot-nginx`).
 **Impact:** Artifacts lost on restart; no durability for LLM outputs
 
 **Current state:**
-- `RuntimeArtifact` stored in `Map<string, RuntimeArtifact>` in `MemStorage`
-- MinIO running on `:9000` (separate service, accessible)
-- No S3/MinIO client in `server/routes.ts` or `server/storage.ts`
-- The existing `sqlite_minio_sync.py` is for memory sync, not for artifact storage
+- `RuntimeArtifact` now stored in PostgreSQL (`runtime_artifacts` table) — content survives restarts
+- MinIO running on `:9000` — not yet used for artifact storage
+- The existing `sqlite_minio_sync.py` is for memory sync, not for bloom-runtime artifact storage
 
-**Resolution:** On artifact creation in `POST .../complete`, upload `artifact.content` to MinIO bucket, store object key in `artifact.url`. This adds durability without requiring `DatabaseStorage` first.
+**Resolution:** On artifact creation in `POST .../complete`, upload `artifact.content` to MinIO bucket, store object key in `artifact.url`. PostgreSQL row stores the reference; MinIO holds the payload.
+
+---
+
+### GAP-7: Membridge Control Plane UI Not Integrated
+
+**Severity:** Medium
+**Impact:** User must open a separate URL (`:8000/static/ui.html`) and manually paste the admin key every session (sessionStorage — lost on tab close)
+
+**Current state:**
+- External UI at `http://<host>:8000/static/ui.html` — vanilla JS, no auth persistence
+- bloom-runtime frontend (`:80`) has no link to Membridge control plane functionality
+- Admin key is already stored server-side in `DatabaseStorage` / env — no need for user to enter it
+
+**Resolution:**
+1. Add proxy routes `/api/membridge/*` in `server/routes.ts` using existing `membridgeFetch()`
+2. Create `MembridgePage.tsx` with projects sidebar + leadership/nodes/promote UI (shadcn/ui)
+3. Add top nav bar in `App.tsx` with links to Runtime and Membridge pages
+
+**Spec:** [[REPLIT_MEMBRIDGE_UI_INTEGRATION.md]]
+**Status:** Spec written (2026-02-25), pending Replit implementation.
 
 ---
 
 ## Recommended Next Steps
 
-Priority order based on: unblocking execution > security hardening > observability.
+Priority order based on: unblocking execution > UI integration > security hardening > observability.
 
-### Priority 1 — Register a Worker (Immediate Unblock)
+### ~~Priority 1 — Persistence Layer~~ ✅ Done (2026-02-25)
+
+Resolved in Replit commit `150b491`. See [[RUNTIME_BACKEND_IMPLEMENTATION_STATE.md]].
+
+---
+
+### ~~Priority 2 — Auth Hardening~~ ✅ Done (2026-02-25)
+
+`runtimeAuthMiddleware` via `X-RUNTIME-API-KEY` header. Resolved in Replit commit `150b491`.
+
+---
+
+### Priority 1 — Register a Worker (Immediate Execution Unblock)
 
 **Effort:** 1–2 hours operational
 **Unlocks:** Steps 4–8 in execution path; full end-to-end test becomes possible
@@ -209,50 +212,44 @@ This step does not require any code changes.
 
 ---
 
-### Priority 2 — Persistence Layer
+### Priority 2 — Integrate Membridge UI into Main Frontend (GAP-7)
 
-**Effort:** 1–2 days
-**Unlocks:** Survives restarts, enables production reliability
+**Effort:** 1 day (Replit Agent)
+**Unlocks:** Single unified admin UI; no more manual admin key entry
 
-Steps:
-1. Provision a PostgreSQL instance (or use SQLite via `better-sqlite3` for local deployment)
-2. Run `npm run db:push` — Drizzle will create all tables from `shared/schema.ts`
-3. Implement `DatabaseStorage extends IStorage` using `drizzle-orm` queries
-4. Replace `export const storage = new MemStorage()` → `new DatabaseStorage()`
-5. Add `DATABASE_URL` to `/etc/bloom-runtime.env`
+Spec: [[REPLIT_MEMBRIDGE_UI_INTEGRATION.md]]
 
-The `IStorage` interface is the contract. All 20+ methods have clear semantics.
-The existing `shared/schema.ts` has all tables: `users`, `llm_tasks`, `leases`, `artifacts`, `results`, `audit_logs`.
+Deliverables:
+- Express proxy routes `/api/membridge/*` using existing `membridgeFetch()`
+- `MembridgePage.tsx` — projects sidebar + leadership/nodes/promote detail view
+- Top nav bar in `App.tsx` linking Runtime ↔ Membridge pages
 
-**Worker state:** workers can remain in-memory (they re-register on heartbeat).
-**Config:** persist `runtimeConfig` in a `settings` table or env file (already done via env).
+**Status:** Spec written, pending Replit implementation.
 
 ---
 
-### Priority 3 — Auth Hardening
+### Priority 4 — Rate Limiting (GAP-3)
 
-**Effort:** 4–8 hours
-**Unlocks:** Safe to expose API beyond trusted network
+**Effort:** 15 minutes
+**Unlocks:** DoS protection
 
-Minimal viable auth:
-1. Add `BLOOM_API_KEY` to `/etc/bloom-runtime.env`
-2. Write middleware:
-   ```typescript
-   app.use('/api/runtime/', (req, res, next) => {
-     const key = req.headers['x-bloom-api-key'];
-     if (key !== process.env.BLOOM_API_KEY) {
-       return res.status(401).json({ error: 'Unauthorized' });
-     }
-     next();
-   });
-   ```
-3. Wire before route registration in `server/index.ts`
+```typescript
+import rateLimit from 'express-rate-limit';
 
-For worker-to-runtime calls (heartbeat, complete), consider a separate `BLOOM_WORKER_KEY` with narrower permissions.
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 100,
+  message: { error: 'Too many requests' }
+});
+app.use('/api/runtime/', apiLimiter);
+app.use('/api/membridge/', apiLimiter);
+```
+
+`express-rate-limit` is already in `dependencies`.
 
 ---
 
-### Priority 4 — Observability Improvements
+### Priority 5 — Observability Improvements
 
 **Effort:** 1–3 days
 **Unlocks:** Production monitoring, incident response
@@ -295,14 +292,15 @@ Add HTTPS certificate via certbot. See GAP-5 above.
 
 ## Gap Summary Matrix
 
-| Gap | ID | Severity | Effort | Unblocks |
-|-----|----|----------|--------|---------|
-| Persistence layer missing | GAP-1 | Critical | 1–2 days | Reliability, production |
-| API auth missing | GAP-2 | Critical | 4–8 hours | Security |
-| Rate limiting not configured | GAP-3 | High | 15 min | DoS protection |
-| Workers not registered | GAP-4 | High | 1–2 hours | Task execution |
-| No TLS | GAP-5 | Medium/Critical | 2–4 hours | Public exposure |
-| Artifacts not in MinIO | GAP-6 | Medium | 4–8 hours | Artifact durability |
+| Gap | ID | Severity | Status | Effort | Unblocks |
+|-----|----|----------|--------|--------|---------|
+| Persistence layer | GAP-1 | Critical | ✅ **RESOLVED** 2026-02-25 | — | — |
+| API auth | GAP-2 | Critical | ✅ **RESOLVED** 2026-02-25 | — | — |
+| Rate limiting | GAP-3 | High | ⏳ Open | 15 min | DoS protection |
+| Workers not registered | GAP-4 | High | ⏳ Open | 1–2 hours ops | Task execution |
+| No TLS | GAP-5 | Medium/Critical | ⏳ Open | 2–4 hours | Public exposure |
+| Artifacts not in MinIO | GAP-6 | Medium | ⏳ Open | 4–8 hours | Artifact durability |
+| Membridge UI not integrated | GAP-7 | Medium | ⏳ In progress (Replit) | 1 day | UX: single unified UI |
 
 ---
 
