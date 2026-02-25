@@ -1,0 +1,38 @@
+{
+  "generated_at": "2026-02-17T09:09:43Z",
+  "hostname": "debian",
+  "legacy_installation": {
+    "claude_cli": true,
+    "claude_mem_plugin": true,
+    "sqlite_db": {
+      "found": true,
+      "path": "/home/vokov/.claude-mem/claude-mem.db",
+      "size_bytes": 2727936,
+      "tables": 22
+    },
+    "minio_config": {
+      "found": true,
+      "path": "/home/vokov/.claude-mem-minio/config.env"
+    },
+    "legacy_hooks": {
+      "found": true,
+      "path": "/home/vokov/.claude-mem-minio/bin",
+      "scripts": "claude-mem-doctor,claude-mem-hook-pull,claude-mem-hook-push,claude-mem-pull,claude-mem-push,claude-mem-status,enforce-project.sh"
+    }
+  },
+  "membridge_services": {
+    "agent_running": false,
+    "server_running": false
+  },
+  "preserved_paths": [
+    "/home/vokov/.claude-mem",
+    "/home/vokov/.claude",
+    "/home/vokov/.claude-mem-minio/config.env"
+  ],
+  "migration_safe": true,
+  "notes": [
+    "Legacy hooks in /home/vokov/.claude-mem-minio/bin remain functional",
+    "New agent runs alongside legacy scripts",
+    "No modification to existing data or auth files"
+  ]
+}
