@@ -106,11 +106,13 @@ MIGRATION.md              — Migration guide with rollback steps
 - **Shared Types** (`shared/schema.ts`) — Drizzle pgTable definitions + TypeScript interfaces for WorkerNode, Lease, LLMTask, LLMResult, RuntimeArtifact, RuntimeConfig, AuditLogEntry + Zod validation schemas
 - **Database** (`server/db.ts`) — Drizzle ORM + @neondatabase/serverless PostgreSQL connection
 - **Storage** (`server/storage.ts`) — DatabaseStorage (PostgreSQL) implementing IStorage for workers, tasks, leases, artifacts, results, audit logs, runtime config
-- **Routes** (`server/routes.ts`) — Express `/api/runtime/*` endpoints with auth middleware, worker sync, hardened Membridge proxy client
+- **Routes** (`server/routes.ts`) — Express `/api/runtime/*` + `/api/membridge/*` endpoints with auth middleware, worker sync, hardened Membridge proxy client
 - **Auth** (`server/middleware/runtimeAuth.ts`) — X-Runtime-API-Key header middleware with constant-time comparison
 - **Worker Sync** (`server/runtime/workerSync.ts`) — Auto-sync workers from Membridge /agents every 10s
 - **Membridge Client** (`server/runtime/membridgeClient.ts`) — Hardened HTTP client with retry, exponential backoff, timeout, connection tracking
-- **Frontend** (`client/src/pages/RuntimeSettings.tsx`) — Runtime Settings UI with Membridge Proxy tab, Task Queue, Overview stats
+- **Frontend — Runtime** (`client/src/pages/RuntimeSettings.tsx`) — Runtime Settings UI with Membridge Proxy tab, Task Queue, Overview stats
+- **Frontend — Membridge** (`client/src/pages/MembridgePage.tsx`) — Control Plane UI: project list, leadership card, nodes table, promote primary
+- **Navigation** (`client/src/App.tsx`) — Top nav bar with Runtime / Membridge tabs
 
 ### BLOOM Runtime API Endpoints (Express, port 5000)
 - `GET /api/runtime/health` — Service health (storage type, uptime, membridge state)
@@ -132,8 +134,16 @@ MIGRATION.md              — Migration guide with rollback steps
 - `GET /api/runtime/audit` — Audit log (optional ?limit=)
 - `GET /api/runtime/stats` — Dashboard stats (tasks/leases/workers counts)
 
+### Membridge Control Plane Proxy Endpoints (Express, port 5000)
+- `GET /api/membridge/health` — Proxy to Membridge /health
+- `GET /api/membridge/projects` — List all projects
+- `GET /api/membridge/projects/:cid/leadership` — Get leadership lease for project
+- `GET /api/membridge/projects/:cid/nodes` — List nodes for project
+- `POST /api/membridge/projects/:cid/leadership/select` — Promote node to primary
+
 ### Authentication
 - Runtime API: `X-Runtime-API-Key` header == `RUNTIME_API_KEY` env var (optional — disabled if not set)
+- Membridge proxy: same auth as runtime API, admin key injected by backend via membridgeFetch()
 - Unprotected: `/api/runtime/health`, `/api/runtime/test-connection`
 - Constant-time comparison via `crypto.timingSafeEqual`
 
@@ -151,6 +161,8 @@ MIGRATION.md              — Migration guide with rollback steps
 - `docs/ІНДЕКС.md` — Master documentation index
 
 ## Recent Changes
+- 2026-02-25: Integrated Membridge Control Plane UI into frontend: /api/membridge/* proxy routes, MembridgePage (projects, leadership, nodes, promote primary), top nav bar
+- 2026-02-25: Updated REPLIT_MEMBRIDGE_UI_INTEGRATION.md with IMPLEMENTED status
 - 2026-02-25: Backend hardening: PostgreSQL persistence (DatabaseStorage), auth middleware, worker auto-sync, hardened membridge client
 - 2026-02-25: Added Drizzle pgTable definitions for all runtime entities (llm_tasks, leases, workers, runtime_artifacts, llm_results, audit_logs, runtime_settings)
 - 2026-02-25: Added /api/runtime/health endpoint with storage type, uptime, membridge connection state

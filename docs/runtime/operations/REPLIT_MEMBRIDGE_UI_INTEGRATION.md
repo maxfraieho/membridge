@@ -1,6 +1,51 @@
-# Replit Agent Prompt: Integrate Membridge Control Plane UI
+# Membridge Control Plane UI Integration
 
-## Context
+**Status: IMPLEMENTED**
+**Date: 2026-02-25**
+
+---
+
+## Implementation Summary
+
+Frontend integrated control plane UI. Proxy model active.
+All Membridge control plane operations execute through BLOOM Runtime backend proxy (`/api/membridge/*`).
+Admin key is never exposed to the frontend — `membridgeFetch()` injects `X-MEMBRIDGE-ADMIN` automatically.
+
+### Files Created/Modified
+
+| File | Action | Purpose |
+|------|--------|---------|
+| `server/routes.ts` | Modified | Added `/api/membridge/*` proxy routes |
+| `client/src/pages/MembridgePage.tsx` | Created | Control plane UI (projects, leadership, nodes, promotion) |
+| `client/src/App.tsx` | Modified | Added nav bar (Runtime / Membridge) + `/membridge` route |
+
+### Proxy Routes
+
+| Method | Path | Proxies To |
+|--------|------|------------|
+| GET | `/api/membridge/health` | `/health` |
+| GET | `/api/membridge/projects` | `/projects` |
+| GET | `/api/membridge/projects/:cid/leadership` | `/projects/{cid}/leadership` |
+| GET | `/api/membridge/projects/:cid/nodes` | `/projects/{cid}/nodes` |
+| POST | `/api/membridge/projects/:cid/leadership/select` | `/projects/{cid}/leadership/select` |
+
+### Architecture
+
+```
+React frontend (/membridge)
+   ↓ /api/membridge/*
+BLOOM Runtime Express backend
+   ↓ membridgeFetch() + X-MEMBRIDGE-ADMIN
+Membridge Control Plane (port 8000)
+   ↓
+Claude CLI Workers
+```
+
+Frontend NEVER contacts Membridge directly. All auth injection happens server-side.
+
+---
+
+## Original Spec
 
 This is a Node.js + Express 5 + React 18 + Vite + TypeScript monorepo.
 

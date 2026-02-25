@@ -350,6 +350,84 @@ export async function registerRoutes(
     res.json(await storage.getTask(task.id));
   });
 
+  // ─── Membridge Control Plane Proxy ───────────────────────────────
+  // All /api/membridge/* routes proxy through membridgeFetch() so the
+  // frontend never touches Membridge directly or sees the admin key.
+
+  app.use("/api/membridge", runtimeAuthMiddleware);
+
+  app.get("/api/membridge/health", async (_req, res) => {
+    try {
+      const response = await membridgeFetch("/health", { retries: 1 });
+      const data = await response.json();
+      res.json(data);
+    } catch (err: any) {
+      res.status(502).json({ error: err.message || "Membridge unreachable" });
+    }
+  });
+
+  app.get("/api/membridge/projects", async (_req, res) => {
+    try {
+      const response = await membridgeFetch("/projects");
+      const data = await response.json();
+      res.json(data);
+    } catch (err: any) {
+      res.status(502).json({ error: err.message || "Membridge unreachable" });
+    }
+  });
+
+  app.get("/api/membridge/projects/:cid/leadership", async (req, res) => {
+    try {
+      const response = await membridgeFetch(`/projects/${req.params.cid}/leadership`);
+      if (!response.ok) {
+        return res.status(response.status).json({ error: `Membridge returned ${response.status}` });
+      }
+      const data = await response.json();
+      res.json(data);
+    } catch (err: any) {
+      res.status(502).json({ error: err.message || "Membridge unreachable" });
+    }
+  });
+
+  app.get("/api/membridge/projects/:cid/nodes", async (req, res) => {
+    try {
+      const response = await membridgeFetch(`/projects/${req.params.cid}/nodes`);
+      if (!response.ok) {
+        return res.status(response.status).json({ error: `Membridge returned ${response.status}` });
+      }
+      const data = await response.json();
+      res.json(data);
+    } catch (err: any) {
+      res.status(502).json({ error: err.message || "Membridge unreachable" });
+    }
+  });
+
+  app.post("/api/membridge/projects/:cid/leadership/select", async (req, res) => {
+    try {
+      const response = await membridgeFetch(`/projects/${req.params.cid}/leadership/select`, {
+        method: "POST",
+        body: JSON.stringify(req.body),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        return res.status(response.status).json({ error: text || `Membridge returned ${response.status}` });
+      }
+      const data = await response.json();
+      await storage.addAuditLog({
+        action: "leadership_promote",
+        entity_type: "membridge_project",
+        entity_id: req.params.cid,
+        actor: "admin",
+        detail: `Promoted primary to ${req.body?.primary_node_id || "unknown"} for project ${req.params.cid}`,
+      });
+      res.json(data);
+    } catch (err: any) {
+      res.status(502).json({ error: err.message || "Membridge unreachable" });
+    }
+  });
+
+  // ─── Runtime Stats ─────────────────────────────────────────────
+
   app.get("/api/runtime/stats", async (_req, res) => {
     const [tasks, activeLeases, workers] = await Promise.all([
       storage.listTasks(),
