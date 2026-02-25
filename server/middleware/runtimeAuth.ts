@@ -6,6 +6,11 @@ const UNPROTECTED_PATHS = [
   "/api/runtime/test-connection",
 ];
 
+const UNPROTECTED_SUFFIXES = [
+  "/health",
+  "/test-connection",
+];
+
 function constantTimeCompare(a: string, b: string): boolean {
   if (a.length !== b.length) {
     const dummy = Buffer.alloc(a.length);
@@ -22,7 +27,11 @@ export function runtimeAuthMiddleware(req: Request, res: Response, next: NextFun
     return next();
   }
 
-  if (UNPROTECTED_PATHS.some((p) => req.path === p)) {
+  const fullPath = req.originalUrl?.split("?")[0] || req.path;
+  if (
+    UNPROTECTED_PATHS.some((p) => fullPath === p) ||
+    UNPROTECTED_SUFFIXES.some((s) => req.path === s)
+  ) {
     return next();
   }
 
