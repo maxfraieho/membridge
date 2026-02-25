@@ -1,13 +1,16 @@
 import type { Express } from "express";
 import { type Server } from "http";
+import rateLimit from "express-rate-limit";
 import { storage, DatabaseStorage } from "./storage";
 import { membridgeFetch, getMembridgeClientState } from "./runtime/membridgeClient";
 import { startWorkerSync } from "./runtime/workerSync";
 import { runtimeAuthMiddleware } from "./middleware/runtimeAuth";
+import { uploadArtifactToMinio, isMinioConfigured, getMinioArtifactUrl } from "./runtime/minioArtifacts";
 import {
   insertLLMTaskSchema,
   completeTaskSchema,
   runtimeConfigSchema,
+  registerWorkerSchema,
   type WorkerNode,
   type TaskStatus,
 } from "@shared/schema";
@@ -47,7 +50,36 @@ export async function registerRoutes(
     await storage.init();
   }
 
+  const apiLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 100,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, please try again later" },
+  });
+
+  const strictLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, please try again later" },
+  });
+
+  app.use("/api/runtime", apiLimiter);
+  app.use("/api/membridge", apiLimiter);
+
   app.use("/api/runtime", runtimeAuthMiddleware);
+
+  if (process.env.NODE_ENV === "production") {
+    app.use((req, res, next) => {
+      if (req.headers["x-forwarded-proto"] === "http") {
+        return res.redirect(301, `https://${req.headers.host}${req.originalUrl}`);
+      }
+      next();
+    });
+    app.set("trust proxy", 1);
+  }
 
   startWorkerSync();
 
@@ -94,7 +126,7 @@ export async function registerRoutes(
     res.json(config);
   });
 
-  app.post("/api/runtime/test-connection", async (_req, res) => {
+  app.post("/api/runtime/test-connection", strictLimiter, async (_req, res) => {
     try {
       const response = await membridgeFetch("/health", { retries: 1 });
       if (!response.ok) {
@@ -148,6 +180,58 @@ export async function registerRoutes(
     const leases = await storage.listLeases({ status: "active" });
     const workerLeases = leases.filter((l) => l.worker_id === worker.id);
     res.json({ ...worker, leases: workerLeases });
+  });
+
+  app.post("/api/runtime/workers", async (req, res) => {
+    const parsed = registerWorkerSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.flatten() });
+    }
+    const input = parsed.data;
+    const now = Date.now();
+    const existing = await storage.getWorker(input.name);
+    const worker: WorkerNode = {
+      id: input.name,
+      node_id: input.name,
+      url: input.url || existing?.url || "",
+      status: input.status || "online",
+      capabilities: {
+        claude_cli: input.capabilities?.claude_cli ?? true,
+        max_concurrency: input.capabilities?.max_concurrency ?? 1,
+        labels: input.capabilities?.labels ?? [],
+      },
+      last_heartbeat: now,
+      ip_addrs: input.ip_addrs || [],
+      obs_count: existing?.obs_count ?? 0,
+      db_sha: existing?.db_sha ?? "",
+      registered_at: existing?.registered_at ?? now,
+      active_leases: 0,
+    };
+    const saved = await storage.upsertWorker(worker);
+    await storage.addAuditLog({
+      action: existing ? "worker_updated" : "worker_registered",
+      entity_type: "worker",
+      entity_id: saved.id,
+      actor: "api",
+      detail: `Worker ${saved.id} registered, status=${saved.status}, max_concurrency=${saved.capabilities.max_concurrency}`,
+    });
+    res.status(existing ? 200 : 201).json(saved);
+  });
+
+  app.delete("/api/runtime/workers/:id", async (req, res) => {
+    const worker = await storage.getWorker(req.params.id);
+    if (!worker) {
+      return res.status(404).json({ error: "Worker not found" });
+    }
+    await storage.removeWorker(req.params.id);
+    await storage.addAuditLog({
+      action: "worker_removed",
+      entity_type: "worker",
+      entity_id: req.params.id,
+      actor: "admin",
+      detail: `Worker ${req.params.id} unregistered`,
+    });
+    res.json({ removed: true, id: req.params.id });
   });
 
   app.post("/api/runtime/llm-tasks", async (req, res) => {
@@ -260,16 +344,29 @@ export async function registerRoutes(
     const input = parsed.data;
     const now = Date.now();
 
+    let artifactUrl: string | null = null;
+    let artifactContent = input.output;
+
+    if (isMinioConfigured() && input.output) {
+      try {
+        const objectKey = `artifacts/${task.id}/${now}.json`;
+        artifactUrl = await uploadArtifactToMinio(objectKey, input.output);
+        artifactContent = null;
+      } catch (err: any) {
+        console.warn("[minio] artifact upload failed, storing in PostgreSQL:", err.message);
+      }
+    }
+
     const artifact = await storage.createArtifact({
       task_id: task.id,
       job_id: null,
       type: input.artifact_type,
       created_at: now,
       finalized: true,
-      url: null,
+      url: artifactUrl,
       entity_refs: [],
       tags: input.artifact_tags,
-      content: input.output,
+      content: artifactContent,
     });
 
     const result = await storage.createResult({

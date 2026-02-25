@@ -238,3 +238,17 @@ export const runtimeConfigSchema = z.object({
 });
 
 export type RuntimeConfigInput = z.infer<typeof runtimeConfigSchema>;
+
+export const registerWorkerSchema = z.object({
+  name: z.string().min(1).max(128),
+  url: z.string().optional(),
+  status: z.enum(["online", "offline", "syncing", "error", "unknown"]).optional().default("online"),
+  capabilities: z.object({
+    claude_cli: z.boolean().default(true),
+    max_concurrency: z.number().int().min(1).max(32).default(1),
+    labels: z.array(z.string()).default([]),
+  }).optional(),
+  ip_addrs: z.array(z.string()).optional(),
+});
+
+export type RegisterWorkerInput = z.infer<typeof registerWorkerSchema>;

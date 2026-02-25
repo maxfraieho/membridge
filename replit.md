@@ -160,7 +160,30 @@ MIGRATION.md              — Migration guide with rollback steps
 - `docs/audit/` — Documentation audit package (rebranding, term matrix, gap analysis)
 - `docs/ІНДЕКС.md` — Master documentation index
 
+### Rate Limiting
+- `express-rate-limit` middleware on `/api/runtime/*` and `/api/membridge/*`
+- General: 100 req/min; Strict (test-connection): 20 req/min
+- Standard `RateLimit-*` headers in responses
+
+### MinIO Artifact Storage
+- `server/runtime/minioArtifacts.ts` — MinIO client for artifact upload/download
+- Env vars: `MINIO_ENDPOINT`, `MINIO_PORT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_ARTIFACT_BUCKET`, `MINIO_USE_SSL`
+- Graceful fallback: if MinIO not configured, artifacts stored in PostgreSQL
+- When configured: content uploaded to `bloom-artifacts` bucket, `minio://` URL stored in `artifact.url`
+
+### TLS / HTTPS
+- Production mode (`NODE_ENV=production`): HTTPS redirect via `X-Forwarded-Proto` check
+- `trust proxy` enabled for reverse proxy deployments
+- Replit: TLS provided by platform automatically
+- Self-hosted: certbot + nginx (documented in GAP-5)
+
 ## Recent Changes
+- 2026-02-25: GAP-3 RESOLVED: Rate limiting (express-rate-limit) on all API routes, 100/min general + 20/min strict
+- 2026-02-25: GAP-4 RESOLVED: POST /api/runtime/workers + DELETE /api/runtime/workers/:id for direct worker registration
+- 2026-02-25: GAP-5 RESOLVED: HTTPS redirect middleware in production, trust proxy for reverse proxy
+- 2026-02-25: GAP-6 RESOLVED: MinIO artifact storage (server/runtime/minioArtifacts.ts), graceful PostgreSQL fallback
+- 2026-02-25: Added registerWorkerSchema to shared/schema.ts
+- 2026-02-25: All 7 GAPs now RESOLVED — production ready
 - 2026-02-25: Integrated Membridge Control Plane UI into frontend: /api/membridge/* proxy routes, MembridgePage (projects, leadership, nodes, promote primary), top nav bar
 - 2026-02-25: Added RUNBOOK_ОНОВЛЕННЯ_ПІСЛЯ_GIT_PULL.md — prompt for Claude agent on local server: update, test, verify pipeline, troubleshoot
 - 2026-02-25: Documentation overhaul: all runtime docs translated to Ukrainian, user guide (ПОСІБНИК_КОРИСТУВАЧА), deployment guide (НАЛАШТУВАННЯ_ТА_РОЗГОРТАННЯ), GAP-7 marked RESOLVED, ІНДЕКС.md updated with new reading routes and guides
