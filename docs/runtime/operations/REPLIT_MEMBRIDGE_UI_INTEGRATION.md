@@ -1,365 +1,365 @@
-# Membridge Control Plane UI Integration
+---
+tags:
+  - domain:runtime
+  - status:canonical
+  - layer:operations
+  - authority:implementation
+created: 2026-02-25
+updated: 2026-02-25
+changelog:
+  - 2026-02-25 (rev 2): Статус IMPLEMENTED. Повна документація українською.
+  - 2026-02-25 (rev 1): Початкова специфікація (англ.)
+title: "REPLIT_MEMBRIDGE_UI_INTEGRATION"
+dg-publish: true
+---
 
-**Status: IMPLEMENTED**
-**Date: 2026-02-25**
+# Інтеграція Membridge Control Plane UI у BLOOM Runtime
+
+> Створено: 2026-02-25
+> Статус: **РЕАЛІЗОВАНО**
+> Layer: Runtime Operations
+> Authority: Implementation Reference
+> Scope: Інтеграція Membridge UI у єдиний фронтенд BLOOM Runtime
 
 ---
 
-## Implementation Summary
+## Зміст
 
-Frontend integrated control plane UI. Proxy model active.
-All Membridge control plane operations execute through BLOOM Runtime backend proxy (`/api/membridge/*`).
-Admin key is never exposed to the frontend — `membridgeFetch()` injects `X-MEMBRIDGE-ADMIN` automatically.
-
-### Files Created/Modified
-
-| File | Action | Purpose |
-|------|--------|---------|
-| `server/routes.ts` | Modified | Added `/api/membridge/*` proxy routes |
-| `client/src/pages/MembridgePage.tsx` | Created | Control plane UI (projects, leadership, nodes, promotion) |
-| `client/src/App.tsx` | Modified | Added nav bar (Runtime / Membridge) + `/membridge` route |
-
-### Proxy Routes
-
-| Method | Path | Proxies To |
-|--------|------|------------|
-| GET | `/api/membridge/health` | `/health` |
-| GET | `/api/membridge/projects` | `/projects` |
-| GET | `/api/membridge/projects/:cid/leadership` | `/projects/{cid}/leadership` |
-| GET | `/api/membridge/projects/:cid/nodes` | `/projects/{cid}/nodes` |
-| POST | `/api/membridge/projects/:cid/leadership/select` | `/projects/{cid}/leadership/select` |
-
-### Architecture
-
-```
-React frontend (/membridge)
-   ↓ /api/membridge/*
-BLOOM Runtime Express backend
-   ↓ membridgeFetch() + X-MEMBRIDGE-ADMIN
-Membridge Control Plane (port 8000)
-   ↓
-Claude CLI Workers
-```
-
-Frontend NEVER contacts Membridge directly. All auth injection happens server-side.
+1. [Що це і навіщо](#що-це-і-навіщо)
+2. [Архітектура](#архітектура)
+3. [Файли проєкту](#файли-проєкту)
+4. [Backend: proxy-маршрути](#backend-proxy-маршрути)
+5. [Frontend: сторінка Membridge](#frontend-сторінка-membridge)
+6. [Навігація](#навігація)
+7. [Безпека](#безпека)
+8. [Налаштування](#налаштування)
+9. [Інструкція з користування](#інструкція-з-користування)
+10. [Перевірка працездатності](#перевірка-працездатності)
 
 ---
 
-## Original Spec
+## Що це і навіщо
 
-This is a Node.js + Express 5 + React 18 + Vite + TypeScript monorepo.
+Membridge Control Plane — це сервіс координації worker-нод, що синхронізують SQLite-пам'ять Claude через MinIO. Раніше для роботи з ним потрібно було:
 
-### Stack
-- Server: `server/routes.ts`, `server/runtime/membridgeClient.ts`
-- Frontend: `client/src/`, React + shadcn/ui + TanStack Query + wouter router
-- Build output: `dist/public/` (Vite) + `dist/index.cjs` (server)
+- відкривати окремий URL (`http://<host>:8000/static/ui.html`)
+- вручну вводити admin key кожен раз (зберігався в sessionStorage)
+- переключатись між двома інтерфейсами
 
-### Current state
-
-The app running on port 80/5000 has one page: `RuntimeSettings` (route `/`).
-
-There is an external Membridge control plane UI at `http://<host>:8000/static/ui.html`
-that requires the user to manually paste an admin key every session (stored in
-sessionStorage — lost on tab close). This is inconvenient and unnecessary.
-
-The bloom-runtime server already stores the admin key internally and exposes a
-`membridgeFetch(path, options?)` function in `server/runtime/membridgeClient.ts`
-that automatically appends `X-MEMBRIDGE-ADMIN` to every outgoing request.
-The base URL comes from `storage.getMembridgeUrl()`.
-
-### Goal
-
-Integrate the Membridge control plane functionality directly into the React
-frontend at port 80, so the user never needs to enter the admin key manually.
+**Тепер** все інтегровано у єдиний фронтенд BLOOM Runtime. Користувач бачить одну панель з двома вкладками: **Runtime** та **Membridge**. Адмін-ключ інжектується бекендом автоматично.
 
 ---
 
-## Membridge API (port 8000) — reverse-engineered contract
+## Архітектура
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check |
-| GET | `/projects` | List all projects |
-| GET | `/projects/{cid}/leadership` | Get leadership info for a project |
-| GET | `/projects/{cid}/nodes` | List nodes for a project |
-| POST | `/projects/{cid}/leadership/select` | Promote a node to primary |
+### Канонічний ланцюг виконання
 
-**POST `/leadership/select` body:**
-```json
-{ "primary_node_id": "string", "lease_seconds": 3600 }
+```
+┌─────────────────────────┐
+│  React frontend         │  /membridge — сторінка MembridgePage
+│  (браузер користувача)  │  /runtime  — сторінка RuntimeSettings
+└────────────┬────────────┘
+             │  HTTP запити до /api/membridge/*
+             ▼
+┌─────────────────────────┐
+│  BLOOM Runtime          │  Express 5 backend (:5000)
+│  server/routes.ts       │  runtimeAuthMiddleware → перевірка X-Runtime-API-Key
+│                         │  membridgeFetch() → інжекція X-MEMBRIDGE-ADMIN
+└────────────┬────────────┘
+             │  HTTP + заголовок X-MEMBRIDGE-ADMIN (автоматично)
+             ▼
+┌─────────────────────────┐
+│  Membridge Control      │  FastAPI (:8000)
+│  Plane                  │  /projects, /agents, /health
+└────────────┬────────────┘
+             │
+             ▼
+┌─────────────────────────┐
+│  Claude CLI Workers     │  Виконання LLM-завдань
+└─────────────────────────┘
 ```
 
-**Leadership response shape:**
-```json
-{ "preferred_primary": "node-id or null", "node_count": 2, "canonical_id": "..." }
-```
+### Ключові принципи
 
-**Nodes response** — array of:
-```json
-{
-  "node_id": "string",
-  "role": "primary" | "secondary" | "unknown",
-  "obs_count": 42,
-  "db_sha": "abc123...",
-  "last_seen": 1700000000,
-  "ip_addrs": ["192.168.x.x"]
-}
-```
-
-**Projects response** — array of:
-```json
-{ "canonical_id": "string", "name": "string" }
-```
+- **Frontend НІКОЛИ не контактує з Membridge напряму** — всі виклики проксуються через бекенд
+- **Admin key не потрапляє у браузер** — інжектується серверним кодом (`membridgeFetch()`)
+- **Два шари не змішуються**: Runtime state (PostgreSQL) та Control Plane state (Membridge) — окремі сутності
 
 ---
 
-## Step 1 — Add proxy routes in `server/routes.ts`
+## Файли проєкту
 
-After the existing line:
-```typescript
-app.use("/api/runtime", runtimeAuthMiddleware);
+| Файл | Дія | Призначення |
+|------|-----|-------------|
+| `server/routes.ts` | Змінений | Додані proxy-маршрути `/api/membridge/*` |
+| `client/src/pages/MembridgePage.tsx` | Створений | UI Control Plane: проєкти, лідерство, ноди, промоція |
+| `client/src/App.tsx` | Змінений | Навігаційна панель (Runtime / Membridge) + маршрут `/membridge` |
+| `server/runtime/membridgeClient.ts` | Без змін | HTTP-клієнт з retry, backoff, timeout (використовується проксі) |
+| `server/middleware/runtimeAuth.ts` | Без змін | Аутентифікація X-Runtime-API-Key |
+
+---
+
+## Backend: proxy-маршрути
+
+Всі маршрути захищені `runtimeAuthMiddleware` і використовують `membridgeFetch()` для інжекції admin key.
+
+### Таблиця маршрутів
+
+| Метод | Шлях у BLOOM Runtime | Проксує до Membridge | Опис |
+|-------|---------------------|---------------------|------|
+| `GET` | `/api/membridge/health` | `/health` | Перевірка з'єднання |
+| `GET` | `/api/membridge/projects` | `/projects` | Список проєктів |
+| `GET` | `/api/membridge/projects/:cid/leadership` | `/projects/{cid}/leadership` | Lease лідерства |
+| `GET` | `/api/membridge/projects/:cid/nodes` | `/projects/{cid}/nodes` | Список нод проєкту |
+| `POST` | `/api/membridge/projects/:cid/leadership/select` | `/projects/{cid}/leadership/select` | Промоція primary-ноди |
+
+### Обробка помилок
+
+- Якщо Membridge **недоступний** → `502 {"error": "fetch failed"}` (нормальна поведінка у Replit)
+- Якщо Membridge повертає **4xx** → статус проксується як є
+- Якщо Membridge повертає **5xx** → `membridgeFetch()` робить retry (до 3 спроб)
+
+### Audit log
+
+Операція промоції primary записується до audit log:
+
 ```
-
-Add:
-```typescript
-app.use("/api/membridge", runtimeAuthMiddleware);
-```
-
-Then, before the final `return httpServer;`, add these proxy handlers:
-
-```typescript
-// ── Membridge control plane proxy ─────────────────────────────────────────
-app.get("/api/membridge/health", async (_req, res) => {
-  try {
-    const r = await membridgeFetch("/health", { retries: 1 });
-    res.status(r.status).json(await r.json());
-  } catch (err: any) {
-    res.status(502).json({ error: err.message });
-  }
-});
-
-app.get("/api/membridge/projects", async (_req, res) => {
-  try {
-    const r = await membridgeFetch("/projects");
-    res.status(r.status).json(await r.json());
-  } catch (err: any) {
-    res.status(502).json({ error: err.message });
-  }
-});
-
-app.get("/api/membridge/projects/:cid/leadership", async (req, res) => {
-  try {
-    const r = await membridgeFetch(`/projects/${req.params.cid}/leadership`);
-    res.status(r.status).json(await r.json());
-  } catch (err: any) {
-    res.status(502).json({ error: err.message });
-  }
-});
-
-app.get("/api/membridge/projects/:cid/nodes", async (req, res) => {
-  try {
-    const r = await membridgeFetch(`/projects/${req.params.cid}/nodes`);
-    res.status(r.status).json(await r.json());
-  } catch (err: any) {
-    res.status(502).json({ error: err.message });
-  }
-});
-
-app.post("/api/membridge/projects/:cid/leadership/select", async (req, res) => {
-  try {
-    const r = await membridgeFetch(
-      `/projects/${req.params.cid}/leadership/select`,
-      { method: "POST", body: JSON.stringify(req.body) }
-    );
-    res.status(r.status).json(await r.json());
-  } catch (err: any) {
-    res.status(502).json({ error: err.message });
-  }
-});
+action: "leadership_promote"
+entity_type: "membridge_project"
+entity_id: <canonical_id>
+detail: "Promoted primary to <node_id> for project <cid>"
 ```
 
 ---
 
-## Step 2 — Create `client/src/pages/MembridgePage.tsx`
+## Frontend: сторінка Membridge
 
-Full React page component. Requirements:
+### Структура сторінки
 
-### Layout
-Two-column, full viewport height (minus nav bar):
-- **Left column** (280px, fixed width, scrollable): project list
-- **Right column** (flex-1, scrollable): project detail
-
-### Project list (left column)
-- Fetched from `GET /api/membridge/projects`
-- `refetchInterval: 30000`
-- Each item: project name (bold, 13px) + canonical_id below (monospace, 11px, muted)
-- Clicking an item selects it → store `selectedCid` + `selectedName` in `useState`
-- Active item: blue-left-border highlight (`border-l-2 border-blue-500 bg-slate-800`)
-- Loading state: 3 `<Skeleton>` rows
-- Error state: red error message
-
-### Project detail (right column)
-Shown only when a project is selected. When nothing selected: centered
-placeholder with a subtle icon (`⬡` or `Server` from lucide-react) and text
-"Select a project from the sidebar".
-
-#### Header area
-Project name (font-semibold, 15px) + canonical_id (monospace, muted, 12px) +
-a `<Button variant="ghost" size="sm">` with `<RefreshCw>` icon that manually
-invalidates all queries for the selected project.
-
-Auto-refresh label: small muted text "auto-refresh 10s" next to the button.
-
-#### Leadership card (`<Card>`)
-- Title: "Leadership"
-- `useQuery` key: `["/api/membridge/projects", cid, "leadership"]`
-- `refetchInterval: 10000`, `enabled: !!selectedCid`
-- Display as a 2-column info grid:
-  - "Preferred primary" → value in blue bold if set, `—` if null
-  - "Node count" → number
-  - "canonical_id" → monospace
-- Loading: `<Skeleton>` lines. Error: red text.
-
-#### Nodes card (`<Card>`)
-- Title: "Nodes" + node count badge
-- `useQuery` key: `["/api/membridge/projects", cid, "nodes"]`
-- `refetchInterval: 10000`, `enabled: !!selectedCid`
-- `<Table>` with columns: Node ID | Role | obs_count | db_sha | Last seen | IPs
-- Role badge variants:
-  - `primary` → `<Badge>` with blue styling (custom className `bg-blue-900 text-blue-300`)
-  - `secondary` → green (`bg-green-900 text-green-300`)
-  - `unknown` → gray (default secondary variant)
-- db_sha: first 12 chars + "…" (show full in `title` attribute for hover)
-- Last seen: relative time helper — `Xs ago` / `Xm ago` / `Xh ago` (from unix timestamp seconds)
-- IPs: joined with line breaks
-- Empty state: "No heartbeats received yet."
-- Loading: skeleton rows. Error: red text.
-
-#### Promote Primary card (`<Card>`)
-- Title: "Promote Primary"
-- Form layout (flex row, gap-2, align-items end):
-  - `<Label>` + `<Input>` for Node ID (placeholder "node-id or hostname", min-width 220px)
-  - `<Label>` + `<Input type="number">` for Lease seconds (default `3600`, width ~90px)
-  - `<Button>` "Promote" (default variant)
-- On submit: `useMutation` → `POST /api/membridge/projects/{cid}/leadership/select`
-  with body `{ primary_node_id, lease_seconds }`
-- On success: show green `<Alert>` with the `detail` field from response.
-  Invalidate leadership + nodes queries.
-- On error: show red `<Alert>` with error message.
-- Clear alert after 5 seconds or on next submit.
-
-### TypeScript interfaces (define in this file)
-```typescript
-interface MbProject {
-  canonical_id: string;
-  name: string;
-}
-
-interface MbLeadership {
-  preferred_primary: string | null;
-  node_count: number;
-  canonical_id: string;
-}
-
-interface MbNode {
-  node_id: string;
-  role: "primary" | "secondary" | "unknown";
-  obs_count: number | null;
-  db_sha: string | null;
-  last_seen: number | null;
-  ip_addrs: string[];
-}
+```
+┌─────────────────────────────────────────────────────────┐
+│  BLOOM    [Runtime]  [Membridge]           ← навігація  │
+├────────────┬────────────────────────────────────────────┤
+│            │                                            │
+│  Проєкти   │   Картка лідерства                        │
+│            │   ┌──────────────────────────────────┐     │
+│  ▸ project │   │ Primary Node: rpi4b              │     │
+│  ▸ project │   │ Canonical ID: abc123...          │     │
+│            │   │ Epoch: 3    Expires: ...         │     │
+│            │   └──────────────────────────────────┘     │
+│ (280px)    │                                            │
+│            │   Таблиця нод                              │
+│            │   ┌──────────────────────────────────┐     │
+│            │   │ Node ID │ Role │ Obs │ SHA │ ... │     │
+│            │   │─────────│──────│─────│─────│─────│     │
+│            │   │ rpi4b   │ prim │ 42  │ abc │ ... │     │
+│            │   │ rpi3    │ sec  │ 38  │ def │ ... │     │
+│            │   └──────────────────────────────────┘     │
+│            │                                            │
+│            │   Промоція primary                         │
+│            │   ┌──────────────────────────────────┐     │
+│            │   │ Node ID: [________]              │     │
+│            │   │ Lease:   [3600] сек              │     │
+│            │   │ [Promote to Primary]             │     │
+│            │   └──────────────────────────────────┘     │
+│            │                                            │
+└────────────┴────────────────────────────────────────────┘
 ```
 
-### Imports to use
-```typescript
-import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiRequest } from "@/lib/queryClient";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { RefreshCw, Server } from "lucide-react";
-```
+### Компоненти
+
+| Компонент | Дані з | Оновлення |
+|-----------|--------|-----------|
+| **ProjectList** (ліва панель) | `GET /api/membridge/projects` | Кожні 30 сек |
+| **LeadershipCard** | `GET /api/membridge/projects/:cid/leadership` | Кожні 30 сек |
+| **NodesTable** | `GET /api/membridge/projects/:cid/nodes` | Кожні 15 сек |
+| **PromotePrimaryForm** | `POST /api/membridge/projects/:cid/leadership/select` | На вимогу |
+
+### Поля таблиці нод
+
+| Колонка | Опис |
+|---------|------|
+| Node ID | Ідентифікатор ноди (hostname або MEMBRIDGE_NODE_ID) |
+| Role | `primary` або `secondary` (бейдж) |
+| Observations | Кількість спостережень у SQLite-базі |
+| DB SHA | SHA256 бази (перші 12 символів) |
+| Last Seen | Час останнього heartbeat (відносний: "5s ago") |
+| IP Addresses | IP-адреси ноди |
+
+### Картка лідерства
+
+| Поле | Опис |
+|------|------|
+| Primary Node | Поточна primary-нода |
+| Canonical ID | `sha256(project_name)[:16]` |
+| Epoch | Монотонно зростаючий лічильник renewal |
+| Issued / Expires | Час видачі та закінчення lease |
+| Status | `active` або `needs selection` |
 
 ---
 
-## Step 3 — Update `client/src/App.tsx`
+## Навігація
 
-Add a persistent top navigation bar rendered above `<Router>`. Nav bar spec:
+Верхня панель навігації відображається на всіх сторінках:
 
-```tsx
-// Nav bar — add above <Router /> inside App()
-<nav className="bg-slate-900 border-b border-slate-700 px-6 h-12 flex items-center gap-6 flex-shrink-0">
-  <span className="font-semibold text-sm text-white">Bloom Runtime</span>
-  <div className="flex gap-4 ml-4">
-    <NavLink href="/">Runtime</NavLink>
-    <NavLink href="/membridge">Membridge</NavLink>
-  </div>
-</nav>
+```
+┌──────────────────────────────────────────────┐
+│  BLOOM    [Runtime]  [Membridge]             │
+└──────────────────────────────────────────────┘
 ```
 
-Create a small `NavLink` helper component inside `App.tsx`:
-```tsx
-function NavLink({ href, children }: { href: string; children: React.ReactNode }) {
-  const [isActive] = useRoute(href === "/" ? "/" : href);
-  // For "/" route, also highlight when on "/runtime"
-  return (
-    <Link
-      href={href}
-      className={`text-sm transition-colors ${
-        isActive
-          ? "text-white font-medium border-b-2 border-blue-400 pb-0.5"
-          : "text-slate-400 hover:text-slate-200"
-      }`}
-    >
-      {children}
-    </Link>
-  );
-}
-```
+| Маршрут | Сторінка | Опис |
+|---------|----------|------|
+| `/` або `/runtime` | RuntimeSettings | Конфігурація Runtime, Workers, Leases, Tasks |
+| `/membridge` | MembridgePage | Control Plane: проєкти, лідерство, ноди |
 
-Import `useRoute` and `Link` from `wouter`, and import `MembridgePage`.
-
-Add route in `<Switch>`:
-```tsx
-<Route path="/membridge" component={MembridgePage} />
-```
-
-Wrap the entire app body in a flex-col so nav + content stack properly:
-```tsx
-<div className="flex flex-col h-screen">
-  <nav>...</nav>
-  <div className="flex-1 overflow-hidden">
-    <Router />
-  </div>
-</div>
-```
+Активна вкладка підсвічується.
 
 ---
 
-## Constraints
+## Безпека
 
-- Do **NOT** modify any existing routes, components, or page behavior.
-- The `RuntimeSettings` page and routes `/` and `/runtime` stay exactly as-is.
-- Do **NOT** install new npm packages — all dependencies already exist.
-- All shadcn/ui components are under `client/src/components/ui/`.
-  Confirmed available: `card`, `table`, `badge`, `button`, `input`, `label`,
-  `skeleton`, `alert`.
-- TypeScript strict — no `any` in component code (only in catch blocks is fine).
-- No changes to `shared/schema.ts` or any other shared files needed.
+### Що захищено
+
+| Аспект | Механізм |
+|--------|----------|
+| Доступ до `/api/membridge/*` | `runtimeAuthMiddleware` (X-Runtime-API-Key) |
+| Admin key Membridge | Інжектується бекендом через `membridgeFetch()` |
+| Audit trail | Операції промоції записуються в PostgreSQL |
+| Masking ключів | API повертає `admin_key_masked`, не реальний ключ |
+
+### Що НЕ потрапляє у браузер
+
+- `MEMBRIDGE_ADMIN_KEY`
+- `DATABASE_URL`
+- `RUNTIME_API_KEY`
+- Будь-які серверні секрети
 
 ---
 
-## Verification after implementation
+## Налаштування
 
-1. `npm run build` must complete with no TypeScript errors.
-2. `GET /api/membridge/projects` returns JSON from the membridge server.
-3. Opening `/membridge` in the browser shows the project list and detail view.
-4. The top nav links switch between Runtime and Membridge pages.
-5. No admin key prompt anywhere — it is handled transparently by the server.
+### Крок 1: Змінні середовища
+
+На бекенді мають бути встановлені:
+
+| Змінна | Обов'язкова | Опис |
+|--------|-------------|------|
+| `DATABASE_URL` | Так | PostgreSQL connection string |
+| `MEMBRIDGE_SERVER_URL` | Ні (за замовчуванням `http://127.0.0.1:8000`) | URL Membridge control plane |
+| `MEMBRIDGE_ADMIN_KEY` | Ні (якщо Membridge без auth) | Ключ для X-MEMBRIDGE-ADMIN |
+| `RUNTIME_API_KEY` | Ні (якщо не встановлено — auth вимкнено) | Ключ для захисту API Runtime |
+
+### Крок 2: Міграція бази
+
+```bash
+npm run db:push
+```
+
+### Крок 3: Налаштування з'єднання через UI
+
+1. Відкрийте сторінку **Runtime** (вкладка "Membridge Proxy")
+2. Введіть URL сервера Membridge (наприклад, `http://192.168.1.10:8000`)
+3. Введіть Admin Key (буде збережений на бекенді)
+4. Натисніть **Save**, потім **Test Connection**
+5. При успішному з'єднанні з'явиться зелене повідомлення
+
+### Крок 4: Перевірка
+
+Перейдіть на вкладку **Membridge**. Якщо Membridge доступний:
+- Ліворуч з'явиться список проєктів
+- Оберіть проєкт → справа з'явиться інформація про лідерство та ноди
+
+---
+
+## Інструкція з користування
+
+### Перегляд проєктів
+
+1. Натисніть **Membridge** у верхній навігації
+2. Зліва побачите список проєктів (автоматично оновлюється кожні 30 сек)
+3. Натисніть на проєкт — справа з'явиться деталі
+
+### Перегляд лідерства
+
+Після вибору проєкту:
+- **Primary Node** — яка нода є джерелом правди (primary)
+- **Epoch** — скільки разів lease було оновлено
+- **Expires** — коли закінчується поточний lease
+- **Status** — `active` (все добре) або `needs selection` (потрібно обрати primary)
+
+### Перегляд нод
+
+Таблиця показує всі ноди, зареєстровані для проєкту:
+- **Role**: `primary` (головна) або `secondary` (вторинна)
+- **Observations**: чим більше — тим актуальніша база
+- **DB SHA**: для порівняння — чи співпадає база на нодах
+- **Last Seen**: якщо давно — нода може бути offline
+
+### Промоція primary
+
+Коли потрібно змінити primary-ноду (наприклад, стара offline):
+
+1. Подивіться таблицю нод — знайдіть потрібний **Node ID**
+2. Введіть Node ID у поле "Node ID" у блоці "Promote Primary"
+3. За потреби змініть тривалість lease (за замовчуванням 3600 сек = 1 година)
+4. Натисніть **Promote to Primary**
+5. При успіху з'явиться повідомлення, дані оновляться автоматично
+
+### Моніторинг Runtime
+
+На вкладці **Runtime**:
+- **Membridge Proxy** — конфігурація з'єднання, таблиця workers, активні leases
+- **Task Queue** — черга завдань, статуси, можливість requeue
+- **Overview** — статистика: workers online, active leases, total tasks
+
+---
+
+## Перевірка працездатності
+
+### Smoke tests (curl)
+
+```bash
+# Health endpoint
+curl -s http://localhost:5000/api/runtime/health
+# Очікується: 200 {"status":"ok","service":"bloom-runtime",...}
+
+# Membridge health (через проксі)
+curl -s http://localhost:5000/api/membridge/health
+# Очікується: 200 (якщо Membridge доступний) або 502 (якщо ні)
+
+# Список проєктів
+curl -s http://localhost:5000/api/membridge/projects
+# Очікується: JSON-масив проєктів або 502
+
+# Промоція (потребує Membridge)
+curl -X POST http://localhost:5000/api/membridge/projects/<cid>/leadership/select \
+  -H 'Content-Type: application/json' \
+  -d '{"primary_node_id": "node-name", "lease_seconds": 3600}'
+```
+
+### Що є нормою у Replit
+
+У середовищі Replit Membridge control plane **не запущений**, тому:
+- `GET /api/membridge/*` → `502 {"error": "fetch failed"}` — **це нормально**
+- Runtime endpoints (`/api/runtime/*`) працюють повноцінно з PostgreSQL
+
+### Що перевіряти у production
+
+1. `/api/runtime/health` → `200`, `storage: "postgresql"`, `membridge.connected: true`
+2. `/api/membridge/projects` → масив проєктів
+3. `/api/membridge/projects/<cid>/nodes` → масив нод
+4. Сторінка `/membridge` у браузері — проєкти та ноди відображаються
+5. Audit log (`/api/runtime/audit`) — записи про дії leadership
+
+---
+
+## Семантичні зв'язки
+
+**Цей документ залежить від:**
+- [[RUNTIME_DEPLOYMENT_STATE_ALPINE.md]] — топологія розгортання
+- [[RUNTIME_BACKEND_IMPLEMENTATION_STATE.md]] — стан бекенду
+
+**На цей документ посилаються:**
+- [[RUNTIME_GAPS_AND_NEXT_STEPS.md]] — GAP-7 (позначений як RESOLVED)
+- [[../../ІНДЕКС.md]] — головний індекс документації

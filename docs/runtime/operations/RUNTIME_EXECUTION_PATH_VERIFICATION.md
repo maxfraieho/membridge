@@ -6,35 +6,37 @@ tags:
   - authority:production
 created: 2026-02-25
 updated: 2026-02-25
+changelog:
+  - 2026-02-25 (rev 2): Оновлено до поточного стану — PostgreSQL, auth, membridge proxy, UI. Перекладено українською.
 title: "RUNTIME_EXECUTION_PATH_VERIFICATION"
 dg-publish: true
 ---
 
-# BLOOM Runtime — Execution Path Verification
+# BLOOM Runtime — Верифікація шляху виконання
 
 > Створено: 2026-02-25
 > Статус: Canonical
 > Layer: Runtime Operations
 > Authority: Production Environment
-> Scope: Actual verified execution path — what is live vs what is pending
+> Scope: Фактичний верифікований шлях виконання — що працює, що очікує
 
 ---
 
-## Overview
+## Огляд
 
-This document traces the full intended execution path of BLOOM Runtime and marks each segment with its actual verified status on the production Alpine deployment.
+Цей документ простежує повний шлях виконання BLOOM Runtime та позначає кожний сегмент фактичним верифікованим статусом.
 
-**Legend:**
-- ✅ `LIVE` — verified working in production
-- ⚙️ `IMPLEMENTED` — code exists, logic correct, but not yet activated (missing precondition)
-- ❌ `MISSING` — not yet built
+**Позначення:**
+- ✅ `LIVE` — верифіковано на production
+- ⚙️ `РЕАЛІЗОВАНО` — код існує, логіка правильна, але ще не активовано (відсутня передумова)
+- ❌ `ВІДСУТНЄ` — ще не побудовано
 
 ---
 
-## Full Execution Path
+## Повний шлях виконання
 
 ```
-Client Request
+Запит клієнта
      │
      ▼
  [1] nginx :80  ──────────────────────── ✅ LIVE
@@ -42,51 +44,59 @@ Client Request
      ▼
  [2] bloom-runtime :5000 (Express)  ───── ✅ LIVE
      │
-     ├─► POST /api/runtime/llm-tasks  ─── ⚙️ IMPLEMENTED (creates task, status=queued)
+     ├─► X-Runtime-API-Key middleware ─── ✅ LIVE (опціонально через RUNTIME_API_KEY)
+     │
+     ├─► /api/membridge/* proxy ────────── ✅ LIVE (проксі до Membridge :8000)
+     │
+     ├─► POST /api/runtime/llm-tasks ──── ✅ LIVE (персистовано в PostgreSQL)
      │
      ▼
- [3] Task Queue (MemStorage)  ─────────── ⚙️ IMPLEMENTED (in-memory)
+ [3] Черга завдань (PostgreSQL) ────────── ✅ LIVE (переживає рестарт)
      │
      ▼
  [4] POST /api/runtime/llm-tasks/:id/lease
-     │   Worker selection (pickWorker)  ── ⚙️ IMPLEMENTED (returns 503 — no workers)
+     │   Вибір worker (pickWorker) ─────── ✅ LIVE (workers з auto-sync)
      │
      ▼
- [5] membridge control plane :8000  ────── ✅ LIVE (GET /agents → [])
+ [5] Worker auto-sync (інтервал 10с) ──── ✅ LIVE (→ membridge /agents)
+     │
+     ├─► membridgeFetch з retry ────────── ✅ LIVE (backoff, timeout, tracking)
      │
      ▼
- [6] Worker Node (Claude CLI agent)  ───── ❌ MISSING (0 registered)
-     │
-     ├─► POST /api/runtime/llm-tasks/:id/heartbeat  ─── ⚙️ IMPLEMENTED
+ [6] Membridge control plane :8000 ─────── ✅ LIVE
      │
      ▼
- [7] Claude CLI execution  ─────────────── ❌ MISSING
+ [7] Worker Node (Claude CLI) ──────────── ⏳ ОЧІКУЄ (потрібна реєстрація)
+     │
+     ├─► POST .../heartbeat ────────────── ⚙️ РЕАЛІЗОВАНО
      │
      ▼
- [8] POST /api/runtime/llm-tasks/:id/complete
-     │   Artifact creation  ─────────────── ⚙️ IMPLEMENTED
-     │   Result recording  ──────────────── ⚙️ IMPLEMENTED
+ [8] Виконання Claude CLI ──────────────── ❌ ВІДСУТНЄ (немає workers)
      │
      ▼
- [9] Artifact stored in MemStorage  ────── ⚙️ IMPLEMENTED (in-memory, not persisted)
+ [9] POST .../complete
+     │   Створення артефакту ────────────── ⚙️ РЕАЛІЗОВАНО
+     │   Запис результату ───────────────── ⚙️ РЕАЛІЗОВАНО
      │
      ▼
-[10] Audit log entry  ──────────────────── ✅ LIVE (in-memory, entries visible via /api/runtime/audit)
+[10] Сховище артефактів (PostgreSQL) ────── ✅ LIVE (персистоване)
      │
      ▼
-[11] Response to client  ───────────────── ✅ LIVE
+[11] Audit log (PostgreSQL) ─────────────── ✅ LIVE (персистований)
+     │
+     ▼
+[12] Відповідь клієнту ──────────────────── ✅ LIVE
 ```
 
 ---
 
-## Segment-by-Segment Verification
+## Посегментна верифікація
 
 ### [1] nginx → bloom-runtime
 
-**Status:** ✅ LIVE
+**Статус:** ✅ LIVE
 
 ```bash
-# Verified:
 curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:80/
 # → 200
 
@@ -94,204 +104,231 @@ curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:80/api/runtime/stats
 # → 200
 ```
 
-nginx config: `/etc/nginx/http.d/bloom-runtime.conf`
+Конфігурація nginx: `/etc/nginx/http.d/bloom-runtime.conf`
 Upstream: `server 127.0.0.1:5000; keepalive 32;`
-Headers injected: `X-Real-IP`, `X-Forwarded-For`, WebSocket upgrade support.
+Заголовки: `X-Real-IP`, `X-Forwarded-For`, підтримка WebSocket upgrade.
 
 ---
 
-### [2] bloom-runtime Express server
+### [2] bloom-runtime Express
 
-**Status:** ✅ LIVE
+**Статус:** ✅ LIVE
 
 ```bash
-# Verified:
-curl -s http://127.0.0.1:5000/api/runtime/stats
-# → {"tasks":{"total":0,"by_status":{}},"leases":{"total":0,"active":0},"workers":{"total":0,"online":0}}
+curl -s http://127.0.0.1:5000/api/runtime/health
+# → {"status":"ok","service":"bloom-runtime","storage":"postgresql",...}
 ```
 
-Node.js 23.11.1, Express 5.0.1.
-Serving React SPA (`dist/public/`) + API (`/api/runtime/*`).
+Node.js 23, Express 5. Обслуговує React SPA (`dist/public/`) + API (`/api/runtime/*`, `/api/membridge/*`).
+
+**Аутентифікація:**
+- `X-Runtime-API-Key` — для всіх `/api/runtime/*` та `/api/membridge/*`
+- Якщо `RUNTIME_API_KEY` не встановлений — auth вимкнений (режим розробки)
+- Незахищені: `/api/runtime/health`, `/api/runtime/test-connection`
 
 ---
 
-### [3] Task creation
+### [3] Створення завдання
 
-**Status:** ⚙️ IMPLEMENTED — not yet tested with real payload
+**Статус:** ✅ LIVE (PostgreSQL)
 
-The `POST /api/runtime/llm-tasks` endpoint is wired to `storage.createTask()`.
-Schema validated with Zod (`insertLLMTaskSchema`).
-Task is created with status `queued` and logged to audit.
-
-Not yet tested with a real task payload in this deployment.
+`POST /api/runtime/llm-tasks` створює завдання у PostgreSQL.
+Валідація через Zod (`insertLLMTaskSchema`).
+Завдання створюється зі статусом `queued`, записується в audit log.
 
 ---
 
-### [4] Lease assignment & worker selection
+### [4] Призначення lease та вибір worker
 
-**Status:** ⚙️ IMPLEMENTED — blocked on worker registration
+**Статус:** ⚙️ РЕАЛІЗОВАНО — заблоковано відсутністю workers
 
-`POST /api/runtime/llm-tasks/:id/lease` calls `pickWorker()`:
+`POST /api/runtime/llm-tasks/:id/lease` викликає `pickWorker()`:
 
-```typescript
-const online = workers.filter(
-  w => w.status === "online" &&
-       w.capabilities.claude_cli &&
-       w.active_leases < w.capabilities.max_concurrency
-);
-if (online.length === 0) return null;
-// → bloom-runtime returns HTTP 503 "No available worker"
+```
+Алгоритм pickWorker():
+┌───────────────────────────────────────────┐
+│ 1. Фільтр: status="online"               │
+│    AND capabilities.claude_cli=true       │
+│    AND active_leases < max_concurrency    │
+├───────────────────────────────────────────┤
+│ 2. Якщо є context_id → sticky routing    │
+│    до існуючого worker для цього контексту│
+├───────────────────────────────────────────┤
+│ 3. Інакше → worker з найбільшою           │
+│    вільною ємністю                        │
+├───────────────────────────────────────────┤
+│ 4. Якщо workers = 0 → return null         │
+│    → HTTP 503 "No available worker"       │
+└───────────────────────────────────────────┘
 ```
 
-Current result: `503 No available worker with free capacity`.
-This will resolve immediately upon first worker registration.
+Вирішиться одразу після першої реєстрації worker.
 
 ---
 
 ### [5] Membridge control plane
 
-**Status:** ✅ LIVE — verified with admin auth
+**Статус:** ✅ LIVE
 
 ```bash
-# Verified (without exposing key):
 curl -s http://127.0.0.1:8000/health
-# → {"status":"ok","service":"membridge-control-plane","version":"0.3.0","projects":0,"agents":0}
-
-# Via bloom-runtime proxy:
-curl -s -X POST http://127.0.0.1:5000/api/runtime/test-connection
-# → {"connected":true,"health":{"status":"ok",...}}
+# → {"status":"ok","service":"membridge-control-plane","version":"0.3.0"}
 ```
 
-Audit log records 2 successful `connection_test` events from deployment smoke tests.
-`GET /agents` returns `[]` — no workers registered.
+Auto-sync workers з Membridge кожні 10 секунд через `workerSync.ts`.
+Поточний стан: `/agents` повертає `[]` — жоден worker не зареєстрований.
 
 ---
 
-### [6] Worker Node (Claude CLI agent)
+### [6] Worker Node (Claude CLI агент)
 
-**Status:** ❌ MISSING
+**Статус:** ⏳ ОЧІКУЄ
 
-No agents have been registered with membridge.
+Жоден агент не зареєстрований у Membridge.
 
-**What is needed to unblock:**
-A worker node must register itself with membridge at `POST /agents` with:
-```json
-{
-  "name": "<worker-id>",
-  "status": "online",
-  "capabilities": {
-    "claude_cli": true,
-    "max_concurrency": 1
-  }
-}
+**Що потрібно для розблокування:**
+
 ```
-
-After registration, `GET /api/runtime/workers` will return the worker,
-and `POST .../lease` will succeed instead of returning 503.
+Worker реєстрація:
+┌─────────────────────────────────────────┐
+│ POST /agents                            │
+│ X-MEMBRIDGE-ADMIN: <admin-key>          │
+│                                         │
+│ {                                       │
+│   "name": "worker-01",                  │
+│   "status": "online",                   │
+│   "capabilities": {                     │
+│     "claude_cli": true,                 │
+│     "max_concurrency": 1                │
+│   }                                     │
+│ }                                       │
+└─────────────────────────────────────────┘
+           │
+           ▼
+GET /api/runtime/workers → [worker-01]
+           │
+           ▼
+POST .../lease → 200 (замість 503)
+```
 
 ---
 
-### [7] Claude CLI execution
+### [7–8] Виконання Claude CLI
 
-**Status:** ❌ MISSING
+**Статус:** ❌ ВІДСУТНЄ (немає workers)
 
-Workers invoke Claude CLI with task parameters from the lease.
-The protocol for this is defined in:
+Workers викликають Claude CLI з параметрами завдання з lease.
+Протокол визначений у:
 [[../../architecture/runtime/INTEGRATION_MEMBRIDGE_CLAUDE_CLI_PROXY.md]]
 
-Not activated — no workers.
-
 ---
 
-### [8] Task completion
+### [9] Завершення завдання
 
-**Status:** ⚙️ IMPLEMENTED
+**Статус:** ⚙️ РЕАЛІЗОВАНО
 
-`POST /api/runtime/llm-tasks/:id/complete` handler:
-1. Validates body with `completeTaskSchema` (Zod)
-2. Creates artifact in storage (`type`, `content`, `tags`)
-3. Creates result record (`status`, `output`, `error_message`, `metrics`)
-4. Updates task status → `completed` or `failed`
-5. Releases lease (`status = "released"`)
-6. Writes audit log
+`POST /api/runtime/llm-tasks/:id/complete`:
 
----
-
-### [9] Artifact storage
-
-**Status:** ⚙️ IMPLEMENTED — in-memory only
-
-Artifacts stored in `Map<string, RuntimeArtifact>` in `MemStorage`.
-Queryable via `GET /api/runtime/artifacts?task_id=<id>`.
-
-**Limitation:** Lost on service restart.
-Does not connect to MinIO in current implementation.
-
----
-
-### [10] Audit log
-
-**Status:** ✅ LIVE — in-memory, visible via API
-
-```bash
-curl -s http://127.0.0.1:5000/api/runtime/audit?limit=10
-# → [...audit entries from smoke test...]
+```
+1. Валідація тіла (Zod: completeTaskSchema)
+       │
+2. Створення артефакту в PostgreSQL
+       │
+3. Запис результату (status, output, error_message, metrics)
+       │
+4. Оновлення статусу завдання → "completed" або "failed"
+       │
+5. Звільнення lease (status = "released")
+       │
+6. Запис в audit log
 ```
 
-All state-changing operations emit audit entries:
-`config_updated`, `connection_test`, `task_created`, `task_leased`,
-`task_completed`, `task_requeued`.
+---
 
-**Limitation:** In-memory. Lost on restart. No persistence to MinIO/DB.
+### [10–11] Сховище артефактів та Audit log
+
+**Статус:** ✅ LIVE (PostgreSQL)
+
+- Артефакти зберігаються в `runtime_artifacts` (PostgreSQL)
+- Audit log у `audit_logs` (PostgreSQL)
+- Обидва переживають рестарти сервісу
+- Запитуються через `GET /api/runtime/artifacts` та `GET /api/runtime/audit`
 
 ---
 
-### [11] Response to client
+### [12] Відповідь клієнту
 
-**Status:** ✅ LIVE
+**Статус:** ✅ LIVE
 
-All API responses are JSON.
-Express request logging: `METHOD /path STATUS DURATIONms :: {responseBody}`.
-Visible in `/var/log/bloom-runtime.log`.
+Всі API відповіді — JSON. Логування запитів: `METHOD /path STATUS DURATIONms`.
 
 ---
 
-## Summary Table
+## Зведена таблиця
 
-| Step | Component | Status | Blocker |
-|------|-----------|--------|---------|
+| Крок | Компонент | Статус | Блокер |
+|------|-----------|--------|--------|
 | 1 | nginx reverse proxy | ✅ LIVE | — |
 | 2 | bloom-runtime Express | ✅ LIVE | — |
-| 3 | Task creation | ⚙️ IMPLEMENTED | — |
-| 4 | Lease / worker selection | ⚙️ IMPLEMENTED | No workers registered |
+| 3 | Створення завдання | ✅ LIVE | — |
+| 4 | Lease / вибір worker | ⚙️ РЕАЛІЗОВАНО | Немає зареєстрованих workers |
 | 5 | Membridge control plane | ✅ LIVE | — |
-| 6 | Worker node | ❌ MISSING | Worker agent not deployed |
-| 7 | Claude CLI execution | ❌ MISSING | Worker node missing |
-| 8 | Task completion + artifact | ⚙️ IMPLEMENTED | Worker node missing |
-| 9 | Artifact storage | ⚙️ IMPLEMENTED | In-memory, no MinIO integration |
-| 10 | Audit log | ✅ LIVE | In-memory only |
-| 11 | API response | ✅ LIVE | — |
+| 6 | Worker node | ⏳ ОЧІКУЄ | Worker не розгорнутий |
+| 7–8 | Виконання Claude CLI | ❌ ВІДСУТНЄ | Worker не розгорнутий |
+| 9 | Завершення + артефакт | ⚙️ РЕАЛІЗОВАНО | Worker не розгорнутий |
+| 10 | Сховище артефактів | ✅ LIVE | PostgreSQL |
+| 11 | Audit log | ✅ LIVE | PostgreSQL |
+| 12 | API відповідь | ✅ LIVE | — |
 
 ---
 
-## What One Worker Registration Unlocks
+## Що розблоковує реєстрація одного worker
 
-Registering a single worker with membridge immediately activates:
-- Steps 4, 6, 7, 8 in the execution path
-- Full end-to-end task execution
-- Lease assignment, heartbeat, completion flow
-- Artifact creation and audit trail
+```
+Реєстрація 1 worker у Membridge
+        │
+        ▼
+┌───────────────────────────────────────┐
+│ Одразу активуються:                   │
+│                                       │
+│  ✅ Крок 4  — Lease assignment        │
+│  ✅ Крок 6  — Worker node             │
+│  ✅ Кроки 7-8 — Claude CLI виконання  │
+│  ✅ Крок 9  — Завершення + артефакт   │
+│                                       │
+│ Повний end-to-end pipeline:           │
+│ create → lease → heartbeat →          │
+│ complete → artifact → audit           │
+└───────────────────────────────────────┘
+```
 
-The entire pipeline is code-complete and waiting for this single operational step.
+Весь pipeline повністю реалізований у коді та чекає на цей єдиний операційний крок.
 
 ---
 
-## Semantic Relations
+## Membridge Proxy (НОВЕ)
 
-**This document depends on:**
-- [[RUNTIME_DEPLOYMENT_STATE_ALPINE.md]] — system topology and service state
-- [[../../architecture/runtime/INTEGRATION_MEMBRIDGE_CLAUDE_CLI_PROXY.md]] — Claude CLI proxy spec
+Окрім Runtime API, тепер доступні proxy-маршрути до Membridge Control Plane:
 
-**This document is referenced by:**
-- [[RUNTIME_GAPS_AND_NEXT_STEPS.md]] — gaps and next steps
-- [[../../ІНДЕКС.md]] — master index
+| Метод | Шлях | Проксує до | Статус |
+|-------|------|-----------|--------|
+| `GET` | `/api/membridge/health` | `/health` | ✅ LIVE |
+| `GET` | `/api/membridge/projects` | `/projects` | ✅ LIVE |
+| `GET` | `/api/membridge/projects/:cid/leadership` | `/projects/{cid}/leadership` | ✅ LIVE |
+| `GET` | `/api/membridge/projects/:cid/nodes` | `/projects/{cid}/nodes` | ✅ LIVE |
+| `POST` | `/api/membridge/projects/:cid/leadership/select` | `/projects/{cid}/leadership/select` | ✅ LIVE |
+
+Всі маршрути використовують `membridgeFetch()` — admin key інжектується серверним кодом.
+Фронтенд: вкладка **Membridge** у навігації.
+
+---
+
+## Семантичні зв'язки
+
+**Цей документ залежить від:**
+- [[RUNTIME_DEPLOYMENT_STATE_ALPINE.md]] — топологія та стан сервісів
+- [[../../architecture/runtime/INTEGRATION_MEMBRIDGE_CLAUDE_CLI_PROXY.md]] — специфікація Claude CLI proxy
+
+**На цей документ посилаються:**
+- [[RUNTIME_GAPS_AND_NEXT_STEPS.md]] — прогалини та наступні кроки
+- [[../../ІНДЕКС.md]] — головний індекс

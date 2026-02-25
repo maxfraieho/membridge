@@ -162,6 +162,7 @@ MIGRATION.md              — Migration guide with rollback steps
 
 ## Recent Changes
 - 2026-02-25: Integrated Membridge Control Plane UI into frontend: /api/membridge/* proxy routes, MembridgePage (projects, leadership, nodes, promote primary), top nav bar
+- 2026-02-25: Documentation overhaul: all runtime docs translated to Ukrainian, user guide (ПОСІБНИК_КОРИСТУВАЧА), deployment guide (НАЛАШТУВАННЯ_ТА_РОЗГОРТАННЯ), GAP-7 marked RESOLVED, ІНДЕКС.md updated with new reading routes and guides
 - 2026-02-25: Updated REPLIT_MEMBRIDGE_UI_INTEGRATION.md with IMPLEMENTED status
 - 2026-02-25: Backend hardening: PostgreSQL persistence (DatabaseStorage), auth middleware, worker auto-sync, hardened membridge client
 - 2026-02-25: Added Drizzle pgTable definitions for all runtime entities (llm_tasks, leases, workers, runtime_artifacts, llm_results, audit_logs, runtime_settings)

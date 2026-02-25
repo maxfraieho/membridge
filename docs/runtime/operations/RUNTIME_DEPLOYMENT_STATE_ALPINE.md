@@ -355,14 +355,42 @@ See: [[RUNTIME_BACKEND_IMPLEMENTATION_STATE.md]] — full implementation detail
 
 ---
 
-## G. Operational Readiness Assessment
+## G. Membridge Control Plane Proxy (НОВЕ — 2026-02-25)
 
-| Dimension | Score | Assessment |
+BLOOM Runtime тепер проксує Membridge Control Plane через `/api/membridge/*`:
+
+```
+Браузер                    BLOOM Runtime                  Membridge
+┌──────────┐   /api/    ┌──────────────┐   HTTP+key    ┌──────────┐
+│          │──membridge──│              │──────────────▶│          │
+│ React    │  /*         │ membridgeFetch│               │ :8000    │
+│ SPA      │             │ ()            │               │ FastAPI  │
+│          │◀────────────│ Admin key     │◀──────────────│          │
+│          │  JSON       │ автоматично   │  JSON         │          │
+└──────────┘             └──────────────┘               └──────────┘
+```
+
+| Метод | Шлях | Проксує до | Статус |
+|-------|------|-----------|--------|
+| `GET` | `/api/membridge/health` | `/health` | ✅ Працює |
+| `GET` | `/api/membridge/projects` | `/projects` | ✅ Працює |
+| `GET` | `/api/membridge/projects/:cid/leadership` | `/projects/{cid}/leadership` | ✅ Працює |
+| `GET` | `/api/membridge/projects/:cid/nodes` | `/projects/{cid}/nodes` | ✅ Працює |
+| `POST` | `/api/membridge/projects/:cid/leadership/select` | `/projects/{cid}/leadership/select` | ✅ Працює |
+
+Фронтенд: вкладка **Membridge** у навігації BLOOM.
+Admin key інжектується серверним кодом — фронтенд ніколи не бачить ключ.
+
+---
+
+## H. Оцінка операційної готовності
+
+| Вимір | Оцінка | Опис |
 |-----------|-------|-----------|
-| **Architecture readiness** | 9/10 | Core architecture sound. Persistence (PostgreSQL), auth middleware, hardened membridgeFetch with retries/backoff now in place. Remaining gap: Membridge UI not yet integrated into main frontend. |
-| **Execution readiness** | 4/10 | Pipeline implemented end-to-end. Still blocked by 0 workers registered. One worker registration makes the entire pipeline operational. |
-| **Operational readiness** | 7/10 | Service auto-starts on boot, logs in place, nginx configured, env secured, state now survives restarts. Missing: log rotation, rate limiting, alerting. |
-| **Production readiness** | 6/10 | GAP-1 (persistence) and GAP-2 (auth) resolved. Remaining gaps: no TLS, no rate limiting, no workers registered, Membridge UI not integrated. Suitable for internal production use on trusted network. |
+| **Архітектурна готовність** | 9/10 | Ядро архітектури надійне. Persistence (PostgreSQL), auth, membridgeFetch з retry/backoff, Membridge UI інтегрований. |
+| **Готовність виконання** | 4/10 | Pipeline реалізований end-to-end. Заблокований відсутністю workers (0 зареєстрованих). Реєстрація одного worker активує весь pipeline. |
+| **Операційна готовність** | 7/10 | Сервіс автозапускається, логи налаштовані, nginx сконфігурований, секрети захищені, стан переживає рестарти. Відсутнє: ротація логів, rate limiting, alerting. |
+| **Production готовність** | 7/10 | GAP-1, GAP-2, GAP-7 вирішені. Залишаються: TLS, rate limiting, реєстрація workers. Придатний для внутрішнього production на довіреній мережі. |
 
 ---
 

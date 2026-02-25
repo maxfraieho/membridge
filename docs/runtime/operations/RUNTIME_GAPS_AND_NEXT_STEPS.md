@@ -7,101 +7,103 @@ tags:
 created: 2026-02-25
 updated: 2026-02-25
 changelog:
-  - 2026-02-25 (rev 2): GAP-1 and GAP-2 marked RESOLVED (Replit commit 150b491). GAP-7 added (Membridge UI integration).
+  - 2026-02-25 (rev 3): GAP-7 позначено RESOLVED. Документ переписано українською. Оновлено матрицю.
+  - 2026-02-25 (rev 2): GAP-1 and GAP-2 marked RESOLVED (Replit commit 150b491). GAP-7 added.
 title: "RUNTIME_GAPS_AND_NEXT_STEPS"
 dg-publish: true
 ---
 
-# BLOOM Runtime — Gaps and Next Steps
+# BLOOM Runtime — Прогалини та наступні кроки
 
 > Створено: 2026-02-25
 > Статус: Canonical
 > Layer: Runtime Operations
 > Authority: Production Environment
-> Scope: Known gaps in deployed runtime + prioritized remediation plan
+> Scope: Відомі прогалини розгортання та пріоритизований план усунення
 
 ---
 
-## Context
+## Контекст
 
-This document captures the delta between the **current deployed state** (2026-02-25) and **production-ready state** for BLOOM Runtime on Alpine Linux.
+Цей документ фіксує дельту між **поточним розгорнутим станом** (2026-02-25) та **production-ready станом** BLOOM Runtime.
 
-Reference: [[RUNTIME_DEPLOYMENT_STATE_ALPINE.md]] — baseline deployment state.
-
----
-
-## Critical Gaps
-
-### GAP-1: Persistence Layer Missing — ✅ RESOLVED (2026-02-25)
-
-**Resolved in:** Replit commit `150b491` — "Add persistent storage and authentication to the runtime"
-
-**Resolution summary:**
-- `DatabaseStorage` class implemented in `server/storage.ts` using Drizzle ORM + `@neondatabase/serverless`
-- Replaces `MemStorage` — same `IStorage` interface, fully compatible
-- All entities persisted: tasks, leases, artifacts, results, audit logs, runtime config
-- Config (membridge URL, admin key) now persisted to `runtime_settings` table and loaded on startup
-
-**See:** [[RUNTIME_BACKEND_IMPLEMENTATION_STATE.md]] for full implementation detail.
+Базовий стан: [[RUNTIME_DEPLOYMENT_STATE_ALPINE.md]]
 
 ---
 
-### GAP-2: Runtime API Has No Authentication — ✅ RESOLVED (2026-02-25)
+## Критичні прогалини
 
-**Resolved in:** Replit commit `150b491` — "Add persistent storage and authentication to the runtime"
+### GAP-1: Відсутність персистентного сховища — ✅ ВИРІШЕНО (2026-02-25)
 
-**Resolution summary:**
-- `server/middleware/runtimeAuth.ts` implemented — `X-RUNTIME-API-KEY` header, timing-safe comparison
-- Applied to all `/api/runtime/*` routes via `app.use("/api/runtime", runtimeAuthMiddleware)`
-- Key read from `RUNTIME_API_KEY` env var; middleware is passthrough if env var unset (dev mode)
-- Unprotected paths: `/api/runtime/health`, `/api/runtime/test-connection`
+**Вирішено у:** Replit commit `150b491`
 
-**New env var required:** `RUNTIME_API_KEY` in `/etc/bloom-runtime.env`
+**Опис рішення:**
+- Клас `DatabaseStorage` у `server/storage.ts` (Drizzle ORM + PostgreSQL)
+- Замінює `MemStorage` — той самий інтерфейс `IStorage`
+- Всі сутності персистовані: tasks, leases, artifacts, results, audit, config
+
+**Деталі:** [[RUNTIME_BACKEND_IMPLEMENTATION_STATE.md]]
 
 ---
 
-### GAP-3: Rate Limiting Not Configured
+### GAP-2: Відсутність аутентифікації Runtime API — ✅ ВИРІШЕНО (2026-02-25)
 
-**Severity:** High
-**Impact:** API surface exposed to unbounded request rates
+**Вирішено у:** Replit commit `150b491`
 
-**Current state:**
-- `express-rate-limit` package is in `dependencies` (installed)
-- No `app.use(rateLimit(...))` call in `server/index.ts` or `server/routes.ts`
+**Опис рішення:**
+- `server/middleware/runtimeAuth.ts` — заголовок `X-Runtime-API-Key`, timing-safe порівняння
+- Застосовано до всіх `/api/runtime/*` маршрутів
+- Ключ з env var `RUNTIME_API_KEY`; якщо не встановлено — auth вимкнено (dev mode)
+- Незахищені маршрути: `/api/runtime/health`, `/api/runtime/test-connection`
 
-**Risk:**
-- Abuse of `POST /api/runtime/llm-tasks` — queue flooding
-- Abuse of `POST /api/runtime/test-connection` — membridge rate limiting triggers
-- Denial of service via request volume
+---
 
-**Resolution:**
+### GAP-3: Rate Limiting не налаштований
+
+**Серйозність:** Висока
+**Вплив:** API відкритий для необмежених запитів
+
+**Поточний стан:**
+- Пакет `express-rate-limit` є у `dependencies` (встановлений)
+- Виклик `app.use(rateLimit(...))` відсутній
+
+**Ризики:**
+- Зловживання `POST /api/runtime/llm-tasks` — переповнення черги
+- Зловживання `POST /api/runtime/test-connection` — тригер rate limiting Membridge
+- DDoS через обсяг запитів
+
+**Рішення:**
+
 ```typescript
 import rateLimit from 'express-rate-limit';
 
 const apiLimiter = rateLimit({
-  windowMs: 60 * 1000,  // 1 minute
+  windowMs: 60 * 1000,
   max: 100,
   message: { error: 'Too many requests' }
 });
 app.use('/api/runtime/', apiLimiter);
+app.use('/api/membridge/', apiLimiter);
 ```
-Estimated effort: 15 minutes.
+
+Орієнтовний час: 15 хвилин.
 
 ---
 
-### GAP-4: Workers Not Registered
+### GAP-4: Workers не зареєстровані
 
-**Severity:** High (blocks task execution)
-**Impact:** Execution pipeline is implemented but cannot run any tasks
+**Серйозність:** Висока (блокує виконання завдань)
+**Вплив:** Pipeline виконання реалізований, але не може обробити жодне завдання
 
-**Current state:**
+**Поточний стан:**
 - `GET /api/runtime/workers` → `[]`
 - `POST /api/runtime/llm-tasks/:id/lease` → `503 No available worker`
-- membridge `/agents` → `{"agents": []}`
-- Full lease/execution pipeline is implemented and waiting
+- Membridge `/agents` → `{"agents": []}`
 
-**What is needed:**
-Each worker agent must register with membridge control plane:
+**Що потрібно:**
+
+Кожен worker-агент повинен зареєструватися в Membridge:
+
 ```http
 POST http://127.0.0.1:8000/agents
 X-MEMBRIDGE-ADMIN: <admin-key>
@@ -118,120 +120,105 @@ Content-Type: application/json
 }
 ```
 
-After registration, bloom-runtime's `GET /api/runtime/workers` will return the worker on next poll (the endpoint syncs from membridge `/agents` on every request).
+Після реєстрації `GET /api/runtime/workers` поверне worker при наступному опитуванні (auto-sync кожні 10 сек).
 
-**Resolution:** Deploy and register at least one Claude CLI worker agent. This is an operational step, not a code change.
+**Рішення:** Розгорнути та зареєструвати хоча б один Claude CLI worker. Це операційний крок, не зміна коду.
 
 ---
 
-### GAP-5: No TLS / HTTPS
+### GAP-5: Відсутність TLS / HTTPS
 
-**Severity:** Medium (for internal deployment) / Critical (for public exposure)
-**Impact:** All traffic including `X-MEMBRIDGE-ADMIN` key travels in plaintext over HTTP
+**Серйозність:** Середня (внутрішнє) / Критична (публічне розгортання)
+**Вплив:** Весь трафік, включаючи `X-MEMBRIDGE-ADMIN`, передається plain-text через HTTP
 
-**Current state:**
-- nginx serves plain HTTP on `:80`
-- No certificate configured
-- localhost-only traffic currently (loopback) — lower risk
+**Поточний стан:**
+- nginx обслуговує HTTP на `:80`
+- Сертифікат не налаштований
+- Наразі тільки localhost-трафік (loopback) — знижений ризик
 
-**Resolution:**
+**Рішення:**
+
 ```nginx
-# /etc/nginx/http.d/bloom-runtime.conf additions:
 server {
     listen 443 ssl;
     ssl_certificate     /etc/letsencrypt/live/<domain>/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/<domain>/privkey.pem;
-    # ... proxy config same as :80 ...
 }
 ```
-Requires: domain name, `certbot` (`apk add certbot certbot-nginx`).
+
+Вимоги: доменне ім'я, `certbot` (`apk add certbot certbot-nginx`).
 
 ---
 
-### GAP-6: Artifact Storage Not Connected to MinIO
+### GAP-6: Артефакти не підключені до MinIO
 
-**Severity:** Medium
-**Impact:** Artifacts lost on restart; no durability for LLM outputs
+**Серйозність:** Середня
+**Вплив:** Артефакти зберігаються лише в PostgreSQL; великі payload-и не в об'єктному сховищі
 
-**Current state:**
-- `RuntimeArtifact` now stored in PostgreSQL (`runtime_artifacts` table) — content survives restarts
-- MinIO running on `:9000` — not yet used for artifact storage
-- The existing `sqlite_minio_sync.py` is for memory sync, not for bloom-runtime artifact storage
+**Поточний стан:**
+- `RuntimeArtifact` зберігається в PostgreSQL (`runtime_artifacts` таблиця) — переживає рестарти
+- MinIO працює на `:9000` — ще не використовується для артефактів runtime
+- `sqlite_minio_sync.py` призначений для sync пам'яті, не для артефактів
 
-**Resolution:** On artifact creation in `POST .../complete`, upload `artifact.content` to MinIO bucket, store object key in `artifact.url`. PostgreSQL row stores the reference; MinIO holds the payload.
-
----
-
-### GAP-7: Membridge Control Plane UI Not Integrated
-
-**Severity:** Medium
-**Impact:** User must open a separate URL (`:8000/static/ui.html`) and manually paste the admin key every session (sessionStorage — lost on tab close)
-
-**Current state:**
-- External UI at `http://<host>:8000/static/ui.html` — vanilla JS, no auth persistence
-- bloom-runtime frontend (`:80`) has no link to Membridge control plane functionality
-- Admin key is already stored server-side in `DatabaseStorage` / env — no need for user to enter it
-
-**Resolution:**
-1. Add proxy routes `/api/membridge/*` in `server/routes.ts` using existing `membridgeFetch()`
-2. Create `MembridgePage.tsx` with projects sidebar + leadership/nodes/promote UI (shadcn/ui)
-3. Add top nav bar in `App.tsx` with links to Runtime and Membridge pages
-
-**Spec:** [[REPLIT_MEMBRIDGE_UI_INTEGRATION.md]]
-**Status:** Spec written (2026-02-25), pending Replit implementation.
+**Рішення:** При створенні артефакту в `POST .../complete` завантажувати `artifact.content` в MinIO bucket, зберігати object key в `artifact.url`. PostgreSQL зберігає посилання; MinIO зберігає payload.
 
 ---
 
-## Recommended Next Steps
+### GAP-7: Membridge Control Plane UI не інтегрований — ✅ ВИРІШЕНО (2026-02-25)
 
-Priority order based on: unblocking execution > UI integration > security hardening > observability.
+**Вирішено у:** Replit implementation
 
-### ~~Priority 1 — Persistence Layer~~ ✅ Done (2026-02-25)
+**Опис рішення:**
+1. Proxy-маршрути `/api/membridge/*` у `server/routes.ts` через `membridgeFetch()`
+2. `MembridgePage.tsx` — список проєктів, лідерство, ноди, промоція primary
+3. Навігаційна панель у `App.tsx` з вкладками Runtime / Membridge
+4. Admin key інжектується бекендом — фронтенд ніколи не бачить ключ
+5. Audit log для операцій промоції
 
-Resolved in Replit commit `150b491`. See [[RUNTIME_BACKEND_IMPLEMENTATION_STATE.md]].
-
----
-
-### ~~Priority 2 — Auth Hardening~~ ✅ Done (2026-02-25)
-
-`runtimeAuthMiddleware` via `X-RUNTIME-API-KEY` header. Resolved in Replit commit `150b491`.
-
----
-
-### Priority 1 — Register a Worker (Immediate Execution Unblock)
-
-**Effort:** 1–2 hours operational
-**Unlocks:** Steps 4–8 in execution path; full end-to-end test becomes possible
-
-1. Deploy a Claude CLI agent on any machine with network access to `:8000`
-2. Configure the agent to register with membridge using `MEMBRIDGE_ADMIN_KEY`
-3. Verify: `GET /api/runtime/workers` returns the worker with `status: "online"`
-4. Test full pipeline: create task → lease → heartbeat → complete → artifact
-
-This step does not require any code changes.
+**Деталі:** [[REPLIT_MEMBRIDGE_UI_INTEGRATION.md]]
 
 ---
 
-### Priority 2 — Integrate Membridge UI into Main Frontend (GAP-7)
+## Рекомендовані наступні кроки
 
-**Effort:** 1 day (Replit Agent)
-**Unlocks:** Single unified admin UI; no more manual admin key entry
+Пріоритет на основі: розблокування виконання > безпека > спостережуваність.
 
-Spec: [[REPLIT_MEMBRIDGE_UI_INTEGRATION.md]]
+### ~~Пріоритет 1 — Persistence Layer~~ ✅ Виконано (2026-02-25)
 
-Deliverables:
-- Express proxy routes `/api/membridge/*` using existing `membridgeFetch()`
-- `MembridgePage.tsx` — projects sidebar + leadership/nodes/promote detail view
-- Top nav bar in `App.tsx` linking Runtime ↔ Membridge pages
-
-**Status:** Spec written, pending Replit implementation.
+Вирішено в Replit commit `150b491`. Див. [[RUNTIME_BACKEND_IMPLEMENTATION_STATE.md]].
 
 ---
 
-### Priority 4 — Rate Limiting (GAP-3)
+### ~~Пріоритет 2 — Auth Hardening~~ ✅ Виконано (2026-02-25)
 
-**Effort:** 15 minutes
-**Unlocks:** DoS protection
+`runtimeAuthMiddleware` через `X-RUNTIME-API-KEY`. Вирішено в Replit commit `150b491`.
+
+---
+
+### ~~Пріоритет 3 — Інтеграція UI Membridge~~ ✅ Виконано (2026-02-25)
+
+Proxy-маршрути, MembridgePage, навігація. Див. [[REPLIT_MEMBRIDGE_UI_INTEGRATION.md]].
+
+---
+
+### Пріоритет 1 — Реєстрація Worker (розблокування виконання)
+
+**Зусилля:** 1–2 години (операційне)
+**Розблоковує:** Кроки 4–8 у конвеєрі виконання; повний end-to-end тест
+
+1. Розгорнути Claude CLI агент на будь-якій машині з мережевим доступом до `:8000`
+2. Налаштувати реєстрацію агента в Membridge з `MEMBRIDGE_ADMIN_KEY`
+3. Перевірити: `GET /api/runtime/workers` повертає worker зі `status: "online"`
+4. Тест повного pipeline: create task → lease → heartbeat → complete → artifact
+
+Не потребує змін коду.
+
+---
+
+### Пріоритет 2 — Rate Limiting (GAP-3)
+
+**Зусилля:** 15 хвилин
+**Розблоковує:** Захист від DoS
 
 ```typescript
 import rateLimit from 'express-rate-limit';
@@ -245,26 +232,18 @@ app.use('/api/runtime/', apiLimiter);
 app.use('/api/membridge/', apiLimiter);
 ```
 
-`express-rate-limit` is already in `dependencies`.
+`express-rate-limit` вже є в `dependencies`.
 
 ---
 
-### Priority 5 — Observability Improvements
+### Пріоритет 3 — Покращення спостережуваності
 
-**Effort:** 1–3 days
-**Unlocks:** Production monitoring, incident response
+**Зусилля:** 1–3 дні
+**Розблоковує:** Моніторинг production, реагування на інциденти
 
-Sub-tasks (independent, can be done separately):
+Під-задачі (незалежні):
 
-**4a. Dedicated `/health` endpoint**
-```typescript
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime(), storage: 'memory' });
-});
-```
-Currently: `GET /` returns React SPA HTML (HTTP 200 but not a proper health check).
-
-**4b. Log rotation**
+**3a. Ротація логів**
 ```bash
 # /etc/logrotate.d/bloom-runtime
 /var/log/bloom-runtime*.log {
@@ -279,36 +258,57 @@ Currently: `GET /` returns React SPA HTML (HTTP 200 but not a proper health chec
 }
 ```
 
-**4c. Persistent audit log to MinIO**
-Flush `auditLogs[]` periodically to MinIO as JSONL file. Low effort, high value.
+**3b. Персистентний audit log до MinIO**
+Періодичний flush `auditLogs[]` до MinIO як JSONL файл.
 
-**4d. Metrics endpoint**
-Expose Prometheus-compatible `/metrics` for worker count, task throughput, lease duration.
+**3c. Endpoint метрик**
+Prometheus-сумісний `/metrics` для кількості workers, throughput завдань, тривалості leases.
 
-**4e. TLS**
-Add HTTPS certificate via certbot. See GAP-5 above.
-
----
-
-## Gap Summary Matrix
-
-| Gap | ID | Severity | Status | Effort | Unblocks |
-|-----|----|----------|--------|--------|---------|
-| Persistence layer | GAP-1 | Critical | ✅ **RESOLVED** 2026-02-25 | — | — |
-| API auth | GAP-2 | Critical | ✅ **RESOLVED** 2026-02-25 | — | — |
-| Rate limiting | GAP-3 | High | ⏳ Open | 15 min | DoS protection |
-| Workers not registered | GAP-4 | High | ⏳ Open | 1–2 hours ops | Task execution |
-| No TLS | GAP-5 | Medium/Critical | ⏳ Open | 2–4 hours | Public exposure |
-| Artifacts not in MinIO | GAP-6 | Medium | ⏳ Open | 4–8 hours | Artifact durability |
-| Membridge UI not integrated | GAP-7 | Medium | ⏳ In progress (Replit) | 1 day | UX: single unified UI |
+**3d. TLS (GAP-5)**
+HTTPS сертифікат через certbot.
 
 ---
 
-## Semantic Relations
+## Зведена матриця прогалин
 
-**This document depends on:**
-- [[RUNTIME_DEPLOYMENT_STATE_ALPINE.md]] — actual deployed state baseline
-- [[RUNTIME_EXECUTION_PATH_VERIFICATION.md]] — which steps are live vs blocked
+| Прогалина | ID | Серйозність | Статус | Зусилля | Розблоковує |
+|-----------|----|-------------|--------|---------|-------------|
+| Persistence layer | GAP-1 | Критична | ✅ **ВИРІШЕНО** | — | — |
+| API auth | GAP-2 | Критична | ✅ **ВИРІШЕНО** | — | — |
+| Rate limiting | GAP-3 | Висока | ⏳ Відкрита | 15 хв | Захист від DoS |
+| Workers не зареєстровані | GAP-4 | Висока | ⏳ Відкрита | 1–2 год ops | Виконання завдань |
+| Відсутність TLS | GAP-5 | Середня | ⏳ Відкрита | 2–4 год | Публічне розгортання |
+| Артефакти не в MinIO | GAP-6 | Середня | ⏳ Відкрита | 4–8 год | Довговічність артефактів |
+| Membridge UI не інтегр. | GAP-7 | Середня | ✅ **ВИРІШЕНО** | — | — |
 
-**This document is referenced by:**
-- [[../../ІНДЕКС.md]] — master index
+---
+
+## Діаграма пріоритетів
+
+```
+                   ┌───────────────────────┐
+                   │  BLOOM Runtime        │
+                   │  Production Readiness │
+                   └───────────┬───────────┘
+                               │
+          ┌────────────────────┼────────────────────┐
+          ▼                    ▼                    ▼
+   ✅ ВИРІШЕНО          ⏳ НАСТУПНІ           🔮 ПЕРСПЕКТИВА
+   ┌─────────────┐    ┌──────────────┐     ┌──────────────┐
+   │ GAP-1 DB    │    │ GAP-4 Worker │     │ GAP-5 TLS    │
+   │ GAP-2 Auth  │    │ GAP-3 Rate   │     │ GAP-6 MinIO  │
+   │ GAP-7 UI    │    │   Limit      │     │   artifacts  │
+   └─────────────┘    └──────────────┘     └──────────────┘
+                      Пріоритет 1-2          Пріоритет 3+
+```
+
+---
+
+## Семантичні зв'язки
+
+**Цей документ залежить від:**
+- [[RUNTIME_DEPLOYMENT_STATE_ALPINE.md]] — базовий стан розгортання
+- [[RUNTIME_EXECUTION_PATH_VERIFICATION.md]] — які кроки live vs blocked
+
+**На цей документ посилаються:**
+- [[../../ІНДЕКС.md]] — головний індекс
