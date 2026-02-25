@@ -102,7 +102,49 @@ DEPLOYMENT.md             — Deployment documentation
 MIGRATION.md              — Migration guide with rollback steps
 ```
 
+### BLOOM Runtime (TypeScript/React layer)
+- **Shared Types** (`shared/schema.ts`) — WorkerNode, Lease, LLMTask, LLMResult, RuntimeArtifact, RuntimeConfig, AuditLogEntry + Zod validation schemas
+- **Storage** (`server/storage.ts`) — In-memory IStorage with CRUD for workers, tasks, leases, artifacts, results, audit logs, runtime config
+- **Routes** (`server/routes.ts`) — Express `/api/runtime/*` endpoints with Membridge HTTP proxy client
+- **Frontend** (`client/src/pages/RuntimeSettings.tsx`) — Runtime Settings UI with Membridge Proxy tab, Task Queue, Overview stats
+
+### BLOOM Runtime API Endpoints (Express, port 5000)
+- `GET /api/runtime/config` — Get Membridge proxy config
+- `POST /api/runtime/config` — Save proxy config (URL + admin key)
+- `POST /api/runtime/test-connection` — Test Membridge /health connectivity
+- `GET /api/runtime/workers` — Merged worker list (local + Membridge /agents)
+- `GET /api/runtime/workers/:id` — Worker detail with active leases
+- `POST /api/runtime/llm-tasks` — Create LLM task
+- `GET /api/runtime/llm-tasks` — List tasks (optional ?status= filter)
+- `GET /api/runtime/llm-tasks/:id` — Task detail
+- `POST /api/runtime/llm-tasks/:id/lease` — Assign task to worker (capability-based routing)
+- `POST /api/runtime/llm-tasks/:id/heartbeat` — Renew lease heartbeat
+- `POST /api/runtime/llm-tasks/:id/complete` — Submit result + create artifact
+- `POST /api/runtime/llm-tasks/:id/requeue` — Requeue failed/dead task
+- `GET /api/runtime/leases` — List leases (optional ?status= filter)
+- `GET /api/runtime/runs` — Recent task executions
+- `GET /api/runtime/artifacts` — Artifacts (optional ?task_id= filter)
+- `GET /api/runtime/audit` — Audit log (optional ?limit=)
+- `GET /api/runtime/stats` — Dashboard stats (tasks/leases/workers counts)
+
+### Key BLOOM Invariants
+- Two memory layers NEVER mix: `claude-mem.db` (Membridge→MinIO, session) and `DiffMem/git` (agent reasoning, Proposal/Apply only)
+- Workers return results/proposals only — never write directly to canonical storage
+- Lease TTL default 300s; stale leases expire and requeue tasks (max 3 attempts → dead)
+- Worker routing: healthiest online with free slots + sticky by context_id
+
+### Documentation
+- `docs/architecture/runtime/INTEGRATION_MEMBRIDGE_CLAUDE_CLI_PROXY.md` — Canonical runtime integration spec
+- `docs/audit/` — Documentation audit package (rebranding, term matrix, gap analysis)
+- `docs/ІНДЕКС.md` — Master documentation index
+
 ## Recent Changes
+- 2026-02-25: BLOOM Runtime integration: shared types, storage, API routes, RuntimeSettings UI, canonical docs
+- 2026-02-25: Added /api/runtime/* endpoints with Membridge HTTP proxy, leasing, failover
+- 2026-02-25: Created RuntimeSettings page with Proxy, Task Queue, and Overview tabs
+- 2026-02-25: Created INTEGRATION_MEMBRIDGE_CLAUDE_CLI_PROXY.md canonical spec
+- 2026-02-25: Created docs/audit/ package (rebranding audit, term matrix, gap analysis)
+- 2026-02-25: Created docs/ІНДЕКС.md master index
 - 2026-02-17: Migration-safe deployment: compat layer, validate-install, installer modes, MIGRATION.md
 - 2026-02-17: Added membridge/compat/ with push_project, pull_project, doctor_project wrappers
 - 2026-02-17: Added POST /pull, /push, /doctor agent aliases for project-aware execution
