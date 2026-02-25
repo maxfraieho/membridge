@@ -49,3 +49,4 @@ venv
 # Node (template leftovers)
 node_modules/
 dist/
+attached_assets/
