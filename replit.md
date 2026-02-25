@@ -157,6 +157,7 @@ MIGRATION.md              — Migration guide with rollback steps
 ### Documentation
 - `docs/architecture/runtime/INTEGRATION_MEMBRIDGE_CLAUDE_CLI_PROXY.md` — Canonical runtime integration spec
 - `docs/runtime/operations/RUNTIME_BACKEND_IMPLEMENTATION_STATE.md` — Backend hardening implementation state
+- `docs/frontend/LOVABLE_INITIAL_INSTRUCTION_BLOOM_AGENTS.md` — Lovable prompt: agents + LLM resources (NLM + Membridge)
 - `docs/audit/` — Documentation audit package (rebranding, term matrix, gap analysis)
 - `docs/ІНДЕКС.md` — Master documentation index
 
