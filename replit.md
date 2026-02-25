@@ -103,16 +103,21 @@ MIGRATION.md              — Migration guide with rollback steps
 ```
 
 ### BLOOM Runtime (TypeScript/React layer)
-- **Shared Types** (`shared/schema.ts`) — WorkerNode, Lease, LLMTask, LLMResult, RuntimeArtifact, RuntimeConfig, AuditLogEntry + Zod validation schemas
-- **Storage** (`server/storage.ts`) — In-memory IStorage with CRUD for workers, tasks, leases, artifacts, results, audit logs, runtime config
-- **Routes** (`server/routes.ts`) — Express `/api/runtime/*` endpoints with Membridge HTTP proxy client
+- **Shared Types** (`shared/schema.ts`) — Drizzle pgTable definitions + TypeScript interfaces for WorkerNode, Lease, LLMTask, LLMResult, RuntimeArtifact, RuntimeConfig, AuditLogEntry + Zod validation schemas
+- **Database** (`server/db.ts`) — Drizzle ORM + @neondatabase/serverless PostgreSQL connection
+- **Storage** (`server/storage.ts`) — DatabaseStorage (PostgreSQL) implementing IStorage for workers, tasks, leases, artifacts, results, audit logs, runtime config
+- **Routes** (`server/routes.ts`) — Express `/api/runtime/*` endpoints with auth middleware, worker sync, hardened Membridge proxy client
+- **Auth** (`server/middleware/runtimeAuth.ts`) — X-Runtime-API-Key header middleware with constant-time comparison
+- **Worker Sync** (`server/runtime/workerSync.ts`) — Auto-sync workers from Membridge /agents every 10s
+- **Membridge Client** (`server/runtime/membridgeClient.ts`) — Hardened HTTP client with retry, exponential backoff, timeout, connection tracking
 - **Frontend** (`client/src/pages/RuntimeSettings.tsx`) — Runtime Settings UI with Membridge Proxy tab, Task Queue, Overview stats
 
 ### BLOOM Runtime API Endpoints (Express, port 5000)
+- `GET /api/runtime/health` — Service health (storage type, uptime, membridge state)
 - `GET /api/runtime/config` — Get Membridge proxy config
 - `POST /api/runtime/config` — Save proxy config (URL + admin key)
 - `POST /api/runtime/test-connection` — Test Membridge /health connectivity
-- `GET /api/runtime/workers` — Merged worker list (local + Membridge /agents)
+- `GET /api/runtime/workers` — Workers from PostgreSQL (synced from Membridge /agents)
 - `GET /api/runtime/workers/:id` — Worker detail with active leases
 - `POST /api/runtime/llm-tasks` — Create LLM task
 - `GET /api/runtime/llm-tasks` — List tasks (optional ?status= filter)
@@ -127,18 +132,32 @@ MIGRATION.md              — Migration guide with rollback steps
 - `GET /api/runtime/audit` — Audit log (optional ?limit=)
 - `GET /api/runtime/stats` — Dashboard stats (tasks/leases/workers counts)
 
+### Authentication
+- Runtime API: `X-Runtime-API-Key` header == `RUNTIME_API_KEY` env var (optional — disabled if not set)
+- Unprotected: `/api/runtime/health`, `/api/runtime/test-connection`
+- Constant-time comparison via `crypto.timingSafeEqual`
+
 ### Key BLOOM Invariants
 - Two memory layers NEVER mix: `claude-mem.db` (Membridge→MinIO, session) and `DiffMem/git` (agent reasoning, Proposal/Apply only)
 - Workers return results/proposals only — never write directly to canonical storage
 - Lease TTL default 300s; stale leases expire and requeue tasks (max 3 attempts → dead)
 - Worker routing: healthiest online with free slots + sticky by context_id
+- All state persisted to PostgreSQL — survives restart
 
 ### Documentation
 - `docs/architecture/runtime/INTEGRATION_MEMBRIDGE_CLAUDE_CLI_PROXY.md` — Canonical runtime integration spec
+- `docs/runtime/operations/RUNTIME_BACKEND_IMPLEMENTATION_STATE.md` — Backend hardening implementation state
 - `docs/audit/` — Documentation audit package (rebranding, term matrix, gap analysis)
 - `docs/ІНДЕКС.md` — Master documentation index
 
 ## Recent Changes
+- 2026-02-25: Backend hardening: PostgreSQL persistence (DatabaseStorage), auth middleware, worker auto-sync, hardened membridge client
+- 2026-02-25: Added Drizzle pgTable definitions for all runtime entities (llm_tasks, leases, workers, runtime_artifacts, llm_results, audit_logs, runtime_settings)
+- 2026-02-25: Added /api/runtime/health endpoint with storage type, uptime, membridge connection state
+- 2026-02-25: Added server/middleware/runtimeAuth.ts with X-Runtime-API-Key constant-time auth
+- 2026-02-25: Added server/runtime/workerSync.ts — auto-sync workers from membridge every 10s
+- 2026-02-25: Added server/runtime/membridgeClient.ts — retry (3x), exponential backoff (500ms×2^n), timeout (10s), connection tracking
+- 2026-02-25: Created docs/runtime/operations/RUNTIME_BACKEND_IMPLEMENTATION_STATE.md
 - 2026-02-25: BLOOM Runtime integration: shared types, storage, API routes, RuntimeSettings UI, canonical docs
 - 2026-02-25: Added /api/runtime/* endpoints with Membridge HTTP proxy, leasing, failover
 - 2026-02-25: Created RuntimeSettings page with Proxy, Task Queue, and Overview tabs

@@ -1,6 +1,9 @@
 import type { Express } from "express";
-import { createServer, type Server } from "http";
-import { storage } from "./storage";
+import { type Server } from "http";
+import { storage, DatabaseStorage } from "./storage";
+import { membridgeFetch, getMembridgeClientState } from "./runtime/membridgeClient";
+import { startWorkerSync } from "./runtime/workerSync";
+import { runtimeAuthMiddleware } from "./middleware/runtimeAuth";
 import {
   insertLLMTaskSchema,
   completeTaskSchema,
@@ -10,31 +13,6 @@ import {
 } from "@shared/schema";
 
 const LEASE_TTL_SECONDS = 300;
-const MEMBRIDGE_TIMEOUT_MS = 10000;
-
-async function membridgeFetch(path: string, options?: RequestInit): Promise<Response> {
-  const baseUrl = storage.getMembridgeUrl();
-  const adminKey = storage.getAdminKey();
-
-  const url = `${baseUrl}${path}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MEMBRIDGE_TIMEOUT_MS);
-
-  try {
-    const res = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        "X-MEMBRIDGE-ADMIN": adminKey,
-        ...(options?.headers || {}),
-      },
-    });
-    return res;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
 
 async function pickWorker(workers: WorkerNode[], contextId?: string | null): Promise<WorkerNode | null> {
   const online = workers.filter(
@@ -65,12 +43,35 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
 
+  if (storage instanceof DatabaseStorage) {
+    await storage.init();
+  }
+
+  app.use("/api/runtime", runtimeAuthMiddleware);
+
+  startWorkerSync();
+
   setInterval(async () => {
-    const expired = await storage.expireStaleLeases();
-    if (expired > 0) {
-      console.log(`[runtime] expired ${expired} stale lease(s), requeued tasks`);
+    try {
+      const expired = await storage.expireStaleLeases();
+      if (expired > 0) {
+        console.log(`[runtime] expired ${expired} stale lease(s), requeued tasks`);
+      }
+    } catch (err) {
+      console.error("[runtime] lease expiry error:", err);
     }
   }, 30000);
+
+  app.get("/api/runtime/health", async (_req, res) => {
+    const clientState = getMembridgeClientState();
+    res.json({
+      status: "ok",
+      service: "bloom-runtime",
+      uptime: process.uptime(),
+      storage: "postgresql",
+      membridge: clientState,
+    });
+  });
 
   app.get("/api/runtime/config", async (_req, res) => {
     const config = await storage.getRuntimeConfig();
@@ -95,7 +96,7 @@ export async function registerRoutes(
 
   app.post("/api/runtime/test-connection", async (_req, res) => {
     try {
-      const response = await membridgeFetch("/health");
+      const response = await membridgeFetch("/health", { retries: 1 });
       if (!response.ok) {
         storage.setConnectionStatus(false);
         return res.json({ connected: false, error: `HTTP ${response.status}` });
@@ -118,55 +119,12 @@ export async function registerRoutes(
 
   app.get("/api/runtime/workers", async (_req, res) => {
     try {
-      const [agentsRes, localWorkers] = await Promise.all([
-        membridgeFetch("/agents").catch(() => null),
-        storage.listWorkers(),
-      ]);
-
+      const localWorkers = await storage.listWorkers();
       const merged = new Map<string, WorkerNode>();
       for (const w of localWorkers) {
-        merged.set(w.id, w);
+        merged.set(w.id, { ...w, active_leases: 0 });
       }
 
-      if (agentsRes && agentsRes.ok) {
-        const agents: any[] = await agentsRes.json();
-        for (const agent of agents) {
-          const id = agent.name || agent.node_id || agent.id;
-          if (!merged.has(id)) {
-            const worker: WorkerNode = {
-              id,
-              node_id: agent.name || agent.node_id || id,
-              url: agent.url || "",
-              status: agent.status || "unknown",
-              capabilities: {
-                claude_cli: true,
-                max_concurrency: agent.max_concurrency || 1,
-                labels: agent.labels || [],
-              },
-              last_heartbeat: agent.last_seen || null,
-              ip_addrs: agent.ip_addrs || [],
-              obs_count: agent.obs_count || 0,
-              db_sha: agent.db_sha || "",
-              registered_at: agent.registered_at || Date.now(),
-              active_leases: 0,
-            };
-            merged.set(id, worker);
-            await storage.upsertWorker(worker);
-          } else {
-            const existing = merged.get(id)!;
-            existing.status = agent.status || existing.status;
-            existing.last_heartbeat = agent.last_seen || existing.last_heartbeat;
-            if (agent.ip_addrs) existing.ip_addrs = agent.ip_addrs;
-            if (agent.obs_count) existing.obs_count = agent.obs_count;
-            merged.set(id, existing);
-            await storage.upsertWorker(existing);
-          }
-        }
-      }
-
-      for (const w of Array.from(merged.values())) {
-        w.active_leases = 0;
-      }
       const activeLeases = await storage.listLeases({ status: "active" });
       for (const lease of activeLeases) {
         const worker = merged.get(lease.worker_id);
@@ -177,7 +135,8 @@ export async function registerRoutes(
 
       res.json(Array.from(merged.values()));
     } catch (err: any) {
-      res.json(await storage.listWorkers());
+      console.error("[workers] list error:", err);
+      res.json([]);
     }
   });
 
@@ -350,7 +309,7 @@ export async function registerRoutes(
     res.json(leases);
   });
 
-  app.get("/api/runtime/runs", async (req, res) => {
+  app.get("/api/runtime/runs", async (_req, res) => {
     const tasks = await storage.listTasks();
     const recent = tasks.slice(0, 50);
     res.json(recent);
@@ -392,7 +351,7 @@ export async function registerRoutes(
   });
 
   app.get("/api/runtime/stats", async (_req, res) => {
-    const [tasks, leases, workers] = await Promise.all([
+    const [tasks, activeLeases, workers] = await Promise.all([
       storage.listTasks(),
       storage.listLeases(),
       storage.listWorkers(),
@@ -403,12 +362,12 @@ export async function registerRoutes(
       tasksByStatus[t.status] = (tasksByStatus[t.status] || 0) + 1;
     }
 
-    const activeLeases = leases.filter((l) => l.status === "active").length;
+    const activeLeasesCount = activeLeases.filter((l) => l.status === "active").length;
     const onlineWorkers = workers.filter((w) => w.status === "online").length;
 
     res.json({
       tasks: { total: tasks.length, by_status: tasksByStatus },
-      leases: { total: leases.length, active: activeLeases },
+      leases: { total: activeLeases.length, active: activeLeasesCount },
       workers: { total: workers.length, online: onlineWorkers },
     });
   });

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, boolean, bigint, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -16,6 +16,89 @@ export const insertUserSchema = createInsertSchema(users).pick({
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
+
+export const llmTasks = pgTable("llm_tasks", {
+  id: varchar("id").primaryKey(),
+  context_id: text("context_id").notNull(),
+  agent_slug: text("agent_slug").notNull(),
+  prompt: text("prompt").notNull(),
+  context_hints: jsonb("context_hints").$type<string[]>().notNull().default([]),
+  policy: jsonb("policy").$type<{ timeout_sec: number; budget: number }>().notNull().default({ timeout_sec: 120, budget: 0 }),
+  desired_format: text("desired_format").$type<"json" | "text">().notNull().default("text"),
+  status: text("status").$type<TaskStatus>().notNull().default("queued"),
+  created_at: bigint("created_at", { mode: "number" }).notNull(),
+  updated_at: bigint("updated_at", { mode: "number" }).notNull(),
+  lease_id: varchar("lease_id"),
+  worker_id: varchar("worker_id"),
+  attempts: integer("attempts").notNull().default(0),
+  max_attempts: integer("max_attempts").notNull().default(3),
+});
+
+export const leases = pgTable("leases", {
+  id: varchar("id").primaryKey(),
+  task_id: varchar("task_id").notNull(),
+  worker_id: varchar("worker_id").notNull(),
+  started_at: bigint("started_at", { mode: "number" }).notNull(),
+  expires_at: bigint("expires_at", { mode: "number" }).notNull(),
+  ttl_seconds: integer("ttl_seconds").notNull(),
+  status: text("status").$type<LeaseStatus>().notNull().default("active"),
+  last_heartbeat: bigint("last_heartbeat", { mode: "number" }).notNull(),
+  context_id: varchar("context_id"),
+});
+
+export const workers = pgTable("workers", {
+  id: varchar("id").primaryKey(),
+  node_id: text("node_id").notNull(),
+  url: text("url").notNull().default(""),
+  status: text("status").$type<WorkerStatus>().notNull().default("unknown"),
+  capabilities: jsonb("capabilities").$type<WorkerCapability>().notNull().default({ claude_cli: true, max_concurrency: 1, labels: [] }),
+  last_heartbeat: bigint("last_heartbeat", { mode: "number" }),
+  ip_addrs: jsonb("ip_addrs").$type<string[]>().notNull().default([]),
+  obs_count: integer("obs_count").notNull().default(0),
+  db_sha: text("db_sha").notNull().default(""),
+  registered_at: bigint("registered_at", { mode: "number" }).notNull(),
+  active_leases: integer("active_leases").notNull().default(0),
+});
+
+export const runtimeArtifacts = pgTable("runtime_artifacts", {
+  id: varchar("id").primaryKey(),
+  task_id: varchar("task_id").notNull(),
+  job_id: varchar("job_id"),
+  type: text("type").notNull(),
+  created_at: bigint("created_at", { mode: "number" }).notNull(),
+  finalized: boolean("finalized").notNull().default(false),
+  url: text("url"),
+  entity_refs: jsonb("entity_refs").$type<string[]>().notNull().default([]),
+  tags: jsonb("tags").$type<string[]>().notNull().default([]),
+  content: text("content"),
+});
+
+export const llmResults = pgTable("llm_results", {
+  id: varchar("id").primaryKey(),
+  task_id: varchar("task_id").notNull(),
+  worker_id: varchar("worker_id").notNull(),
+  artifact_id: varchar("artifact_id").notNull(),
+  status: text("status").$type<"success" | "error">().notNull(),
+  output: text("output"),
+  error_message: text("error_message"),
+  metrics: jsonb("metrics").$type<{ duration_ms: number; tokens_used?: number }>().notNull(),
+  completed_at: bigint("completed_at", { mode: "number" }).notNull(),
+});
+
+export const auditLogs = pgTable("audit_logs", {
+  id: varchar("id").primaryKey(),
+  timestamp: bigint("timestamp", { mode: "number" }).notNull(),
+  action: text("action").notNull(),
+  entity_type: text("entity_type").notNull(),
+  entity_id: varchar("entity_id").notNull(),
+  actor: text("actor").notNull(),
+  detail: text("detail").notNull(),
+});
+
+export const runtimeSettings = pgTable("runtime_settings", {
+  key: varchar("key").primaryKey(),
+  value: text("value").notNull(),
+});
 
 export type WorkerStatus = "online" | "offline" | "syncing" | "error" | "unknown";
 
