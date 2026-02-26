@@ -254,13 +254,23 @@ export async function registerRoutes(
       });
       const data = await response.json();
 
-      await storage.upsertWorker({
+      const updatePayload: any = {
         ...worker,
         agent_version: data.version || worker.agent_version,
-        os_info: data.hostname || worker.os_info,
+        os_info: data.os_info || data.hostname || worker.os_info,
         status: "online",
         last_heartbeat: Date.now(),
-      });
+      };
+      if (data.capabilities) {
+        updatePayload.capabilities = {
+          ...worker.capabilities,
+          ...data.capabilities,
+        };
+      }
+      if (data.ip_addrs) {
+        updatePayload.ip_addrs = data.ip_addrs;
+      }
+      await storage.upsertWorker(updatePayload);
 
       res.json({ reachable: true, ...data });
     } catch (err: any) {
@@ -417,26 +427,40 @@ set -euo pipefail
 # Usage: curl -sSL http://YOUR_SERVER/api/runtime/agent-install-script | bash
 
 MEMBRIDGE_DIR="\${MEMBRIDGE_DIR:-\$HOME/membridge}"
+REPOS_BASE="\${MEMBRIDGE_REPOS_BASE:-\$HOME/projects}"
 REPO_URL="${repoUrl}"
 SERVER_URL="${serverUrl}"
 AGENT_KEY="${agentKey}"
 NODE_ID="${nodeId}"
 AGENT_PORT="${port}"
+AGENT_VERSION="0.4.0"
 
-echo "=== Membridge Agent Installer ==="
+echo "=== Membridge Agent Installer v\$AGENT_VERSION ==="
 echo "Server: \$SERVER_URL"
 echo "Node ID: \$NODE_ID"
 echo "Install dir: \$MEMBRIDGE_DIR"
+echo "Repos base: \$REPOS_BASE"
 echo ""
 
-# Check Python
-if ! command -v python3 &>/dev/null; then
-  echo "ERROR: python3 is required"
-  exit 1
-fi
+# Check prerequisites
+for cmd in python3 git; do
+  if ! command -v \$cmd &>/dev/null; then
+    echo "ERROR: \$cmd is required"
+    exit 1
+  fi
+done
 
-PYVER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+PYVER=\$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 echo "Python version: \$PYVER"
+
+# Detect init system
+INIT_SYSTEM="unknown"
+if command -v systemctl &>/dev/null; then
+  INIT_SYSTEM="systemd"
+elif [ -f /sbin/openrc ] || command -v rc-service &>/dev/null; then
+  INIT_SYSTEM="openrc"
+fi
+echo "Init system: \$INIT_SYSTEM"
 
 # Clone or update repo
 if [ -d "\$MEMBRIDGE_DIR/.git" ]; then
@@ -457,7 +481,14 @@ if [ ! -d "\$MEMBRIDGE_DIR/.venv" ]; then
 fi
 
 echo "Installing dependencies..."
-"\$MEMBRIDGE_DIR/.venv/bin/pip" install -q fastapi uvicorn httpx pydantic boto3
+if [ -f "\$MEMBRIDGE_DIR/requirements.txt" ]; then
+  "\$MEMBRIDGE_DIR/.venv/bin/pip" install -q -r "\$MEMBRIDGE_DIR/requirements.txt"
+else
+  "\$MEMBRIDGE_DIR/.venv/bin/pip" install -q fastapi uvicorn httpx pydantic boto3
+fi
+
+# Create repos directory
+mkdir -p "\$REPOS_BASE"
 
 # Write agent config
 cat > "\$MEMBRIDGE_DIR/.env.agent" <<ENVEOF
@@ -465,31 +496,65 @@ MEMBRIDGE_SERVER_URL=\$SERVER_URL
 MEMBRIDGE_AGENT_KEY=\$AGENT_KEY
 MEMBRIDGE_NODE_ID=\$NODE_ID
 MEMBRIDGE_AGENT_PORT=\$AGENT_PORT
+MEMBRIDGE_AGENT_DIR=\$MEMBRIDGE_DIR
+MEMBRIDGE_REPOS_BASE=\$REPOS_BASE
+MEMBRIDGE_ALLOW_PROCESS_CONTROL=1
+MEMBRIDGE_INSTALL_METHOD=script
+BLOOM_RUNTIME_URL=\$SERVER_URL
+RUNTIME_API_KEY=\$AGENT_KEY
 ENVEOF
 
 echo "Agent config written to \$MEMBRIDGE_DIR/.env.agent"
 
-# Setup systemd if available
-if command -v systemctl &>/dev/null && [ -d /etc/systemd/system ]; then
-  echo "Setting up systemd service..."
-  SUDO=""
-  if [ "$(id -u)" -ne 0 ]; then
-    SUDO="sudo"
-  fi
+# Setup sudoers for passwordless service management
+SUDO=""
+if [ "\$(id -u)" -ne 0 ]; then
+  SUDO="sudo"
+fi
 
+SUDOERS_FILE="/etc/sudoers.d/membridge-agent"
+CURRENT_USER=\$(whoami)
+if [ "\$INIT_SYSTEM" = "systemd" ]; then
+  echo "Configuring sudoers for service management..."
+  \$SUDO tee "\$SUDOERS_FILE" > /dev/null <<SUDEOF
+\$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart membridge-agent
+\$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop membridge-agent
+\$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl start membridge-agent
+\$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl enable membridge-agent
+\$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl disable membridge-agent
+\$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl daemon-reload
+SUDEOF
+  \$SUDO chmod 440 "\$SUDOERS_FILE"
+elif [ "\$INIT_SYSTEM" = "openrc" ]; then
+  echo "Configuring sudoers for service management..."
+  \$SUDO tee "\$SUDOERS_FILE" > /dev/null <<SUDEOF
+\$CURRENT_USER ALL=(ALL) NOPASSWD: /sbin/rc-service membridge-agent *
+\$CURRENT_USER ALL=(ALL) NOPASSWD: /sbin/rc-update add membridge-agent *
+\$CURRENT_USER ALL=(ALL) NOPASSWD: /sbin/rc-update del membridge-agent *
+SUDEOF
+  \$SUDO chmod 440 "\$SUDOERS_FILE"
+fi
+
+# Setup service
+if [ "\$INIT_SYSTEM" = "systemd" ]; then
+  echo "Setting up systemd service..."
   \$SUDO tee /etc/systemd/system/membridge-agent.service > /dev/null <<SVCEOF
 [Unit]
-Description=Membridge Agent Daemon
-After=network.target
+Description=Membridge Agent Daemon v\$AGENT_VERSION
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=$(whoami)
+User=\$CURRENT_USER
 WorkingDirectory=\$MEMBRIDGE_DIR
 EnvironmentFile=\$MEMBRIDGE_DIR/.env.agent
 ExecStart=\$MEMBRIDGE_DIR/.venv/bin/python -m uvicorn agent.main:app --host 0.0.0.0 --port \$AGENT_PORT
 Restart=always
 RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=membridge-agent
 
 [Install]
 WantedBy=multi-user.target
@@ -499,24 +564,89 @@ SVCEOF
   \$SUDO systemctl enable membridge-agent
   \$SUDO systemctl restart membridge-agent
   echo "Service started on port \$AGENT_PORT"
+
+elif [ "\$INIT_SYSTEM" = "openrc" ]; then
+  echo "Setting up OpenRC service..."
+  \$SUDO tee /etc/init.d/membridge-agent > /dev/null <<SVCEOF
+#!/sbin/openrc-run
+
+name="membridge-agent"
+description="Membridge Agent Daemon v\$AGENT_VERSION"
+
+command="\$MEMBRIDGE_DIR/.venv/bin/python"
+command_args="-m uvicorn agent.main:app --host 0.0.0.0 --port \$AGENT_PORT"
+command_user="\$CURRENT_USER"
+command_background=true
+pidfile="/run/\\\${RC_SVCNAME}.pid"
+directory="\$MEMBRIDGE_DIR"
+output_log="/var/log/membridge-agent.log"
+error_log="/var/log/membridge-agent.log"
+
+depend() {
+  need net
+  after firewall
+}
+
+start_pre() {
+  set -a
+  . "\$MEMBRIDGE_DIR/.env.agent"
+  set +a
+  export MEMBRIDGE_SERVER_URL MEMBRIDGE_AGENT_KEY MEMBRIDGE_NODE_ID
+  export MEMBRIDGE_AGENT_PORT MEMBRIDGE_AGENT_DIR MEMBRIDGE_REPOS_BASE
+  export MEMBRIDGE_ALLOW_PROCESS_CONTROL MEMBRIDGE_INSTALL_METHOD
+  export BLOOM_RUNTIME_URL RUNTIME_API_KEY
+}
+SVCEOF
+
+  \$SUDO chmod +x /etc/init.d/membridge-agent
+  \$SUDO rc-update add membridge-agent default
+  \$SUDO rc-service membridge-agent restart
+  echo "Service started on port \$AGENT_PORT"
+
 else
   echo ""
-  echo "No systemd detected. Start manually:"
+  echo "No systemd/OpenRC detected. Start manually:"
   echo "  cd \$MEMBRIDGE_DIR && source .venv/bin/activate"
+  echo "  set -a && source .env.agent && set +a"
   echo "  uvicorn agent.main:app --host 0.0.0.0 --port \$AGENT_PORT"
 fi
+
+# Wait for agent to start
+echo ""
+echo "Waiting for agent to start..."
+for i in 1 2 3 4 5; do
+  sleep 2
+  if curl -s "http://127.0.0.1:\$AGENT_PORT/health" > /dev/null 2>&1; then
+    echo "Agent is running!"
+    break
+  fi
+  echo "  attempt \$i/5..."
+done
 
 # Register with control plane
 echo ""
 echo "Registering with control plane..."
+MY_IP=\$(hostname -I | awk '{print \$1}')
 curl -sS -X POST "\$SERVER_URL/api/runtime/workers" \\
   -H "Content-Type: application/json" \\
-  -d "{\\"name\\": \\"\$NODE_ID\\", \\"url\\": \\"http://\$(hostname -I | awk '{print \$1}'):\$AGENT_PORT\\", \\"status\\": \\"online\\"}" \\
+  -H "X-Runtime-API-Key: \$AGENT_KEY" \\
+  -d "{\\"name\\": \\"\$NODE_ID\\", \\"url\\": \\"http://\$MY_IP:\$AGENT_PORT\\", \\"status\\": \\"online\\", \\"agent_version\\": \\"\$AGENT_VERSION\\", \\"os_info\\": \\"\$(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '\"')\\", \\"install_method\\": \\"script\\"}" \\
   || echo "Warning: Could not register with control plane (it may not be reachable)"
 
 echo ""
 echo "=== Installation complete ==="
-echo "Agent: http://\$(hostname -I | awk '{print \\$1}'):\$AGENT_PORT/health"
+echo "Agent v\$AGENT_VERSION: http://\$MY_IP:\$AGENT_PORT/health"
+echo ""
+echo "Endpoints available:"
+echo "  GET  /health        - Health check with capabilities"
+echo "  GET  /system-info   - System information (memory, disk, uptime)"
+echo "  GET  /repos         - List cloned git repos"
+echo "  POST /self-update   - Update agent via git pull + restart"
+echo "  POST /restart       - Restart agent service"
+echo "  POST /uninstall     - Uninstall agent service"
+echo "  POST /clone         - Clone a git repo for multi-project"
+echo "  POST /sync/pull     - Pull claude-mem.db from MinIO"
+echo "  POST /sync/push     - Push claude-mem.db to MinIO"
 `;
 
     res.setHeader("Content-Type", "text/plain");

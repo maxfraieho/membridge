@@ -226,7 +226,7 @@ function InstallScriptCard() {
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            Requirements: Python 3.11+, git, curl. Automatically sets up systemd service if available.
+            Requirements: Python 3.11+, git, curl. Automatically sets up systemd or OpenRC service. Agent v0.4.0 supports self-update, restart, uninstall, and git clone operations.
           </p>
         </div>
       </CardContent>
