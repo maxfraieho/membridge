@@ -11,6 +11,10 @@ import {
   type InsertLLMTask,
   type TaskStatus,
   type LeaseStatus,
+  type ManagedProject,
+  type ProjectNodeCloneStatus,
+  type CreateProjectInput,
+  type ProjectCloneStatus,
   users,
   llmTasks,
   leases as leasesTable,
@@ -19,6 +23,8 @@ import {
   llmResults,
   auditLogs as auditLogsTable,
   runtimeSettings,
+  managedProjects,
+  projectNodeStatus,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { eq, desc, and, lt } from "drizzle-orm";
@@ -62,6 +68,15 @@ export interface IStorage {
   getAdminKey(): string;
   getMembridgeUrl(): string;
   setConnectionStatus(connected: boolean): void;
+
+  createManagedProject(input: CreateProjectInput): Promise<ManagedProject>;
+  getManagedProject(id: string): Promise<ManagedProject | undefined>;
+  listManagedProjects(): Promise<ManagedProject[]>;
+  updateManagedProjectStatus(id: string, status: ProjectCloneStatus, fields?: Partial<ManagedProject>): Promise<ManagedProject | undefined>;
+  deleteManagedProject(id: string): Promise<void>;
+
+  upsertProjectNodeStatus(projectId: string, nodeId: string, status: ProjectCloneStatus, fields?: Partial<ProjectNodeCloneStatus>): Promise<ProjectNodeCloneStatus>;
+  listProjectNodeStatuses(projectId: string): Promise<ProjectNodeCloneStatus[]>;
 }
 
 function maskKey(key: string): string {
@@ -156,6 +171,33 @@ function toAuditEntry(row: typeof auditLogsTable.$inferSelect): AuditLogEntry {
     entity_id: row.entity_id,
     actor: row.actor,
     detail: row.detail,
+  };
+}
+
+function toManagedProject(row: typeof managedProjects.$inferSelect): ManagedProject {
+  return {
+    id: row.id,
+    name: row.name,
+    repo_url: row.repo_url,
+    canonical_id: row.canonical_id,
+    target_path: row.target_path,
+    clone_status: row.clone_status as ManagedProject["clone_status"],
+    primary_node_id: row.primary_node_id,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    error_message: row.error_message,
+  };
+}
+
+function toProjectNodeStatus(row: typeof projectNodeStatus.$inferSelect): ProjectNodeCloneStatus {
+  return {
+    id: row.id,
+    project_id: row.project_id,
+    node_id: row.node_id,
+    clone_status: row.clone_status as ProjectNodeCloneStatus["clone_status"],
+    last_sync_at: row.last_sync_at,
+    error_message: row.error_message,
+    repo_path: row.repo_path,
   };
 }
 
@@ -493,6 +535,85 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(auditLogsTable.timestamp))
       .limit(limit);
     return rows.map(toAuditEntry);
+  }
+
+  async createManagedProject(input: CreateProjectInput): Promise<ManagedProject> {
+    const now = Date.now();
+    const { createHash } = await import("crypto");
+    const canonical_id = createHash("sha256").update(input.name).digest("hex").substring(0, 16);
+    const id = randomUUID();
+    const [row] = await db.insert(managedProjects).values({
+      id,
+      name: input.name,
+      repo_url: input.repo_url,
+      canonical_id,
+      target_path: input.target_path || null,
+      clone_status: "pending",
+      primary_node_id: input.primary_node_id || null,
+      created_at: now,
+      updated_at: now,
+    }).returning();
+    return toManagedProject(row);
+  }
+
+  async getManagedProject(id: string): Promise<ManagedProject | undefined> {
+    const [row] = await db.select().from(managedProjects).where(eq(managedProjects.id, id));
+    return row ? toManagedProject(row) : undefined;
+  }
+
+  async listManagedProjects(): Promise<ManagedProject[]> {
+    const rows = await db.select().from(managedProjects).orderBy(desc(managedProjects.created_at));
+    return rows.map(toManagedProject);
+  }
+
+  async updateManagedProjectStatus(id: string, status: ProjectCloneStatus, fields?: Partial<ManagedProject>): Promise<ManagedProject | undefined> {
+    const updates: Record<string, any> = {
+      clone_status: status,
+      updated_at: Date.now(),
+    };
+    if (fields?.error_message !== undefined) updates.error_message = fields.error_message;
+    if (fields?.primary_node_id !== undefined) updates.primary_node_id = fields.primary_node_id;
+    if (fields?.target_path !== undefined) updates.target_path = fields.target_path;
+    const [row] = await db.update(managedProjects).set(updates).where(eq(managedProjects.id, id)).returning();
+    return row ? toManagedProject(row) : undefined;
+  }
+
+  async deleteManagedProject(id: string): Promise<void> {
+    await db.delete(projectNodeStatus).where(eq(projectNodeStatus.project_id, id));
+    await db.delete(managedProjects).where(eq(managedProjects.id, id));
+  }
+
+  async upsertProjectNodeStatus(projectId: string, nodeId: string, status: ProjectCloneStatus, fields?: Partial<ProjectNodeCloneStatus>): Promise<ProjectNodeCloneStatus> {
+    const existing = await db.select().from(projectNodeStatus)
+      .where(and(eq(projectNodeStatus.project_id, projectId), eq(projectNodeStatus.node_id, nodeId)));
+
+    if (existing.length > 0) {
+      const updates: Record<string, any> = { clone_status: status };
+      if (fields?.last_sync_at !== undefined) updates.last_sync_at = fields.last_sync_at;
+      if (fields?.error_message !== undefined) updates.error_message = fields.error_message;
+      if (fields?.repo_path !== undefined) updates.repo_path = fields.repo_path;
+      const [row] = await db.update(projectNodeStatus).set(updates)
+        .where(eq(projectNodeStatus.id, existing[0].id)).returning();
+      return toProjectNodeStatus(row);
+    }
+
+    const id = randomUUID();
+    const [row] = await db.insert(projectNodeStatus).values({
+      id,
+      project_id: projectId,
+      node_id: nodeId,
+      clone_status: status,
+      last_sync_at: fields?.last_sync_at || null,
+      error_message: fields?.error_message || null,
+      repo_path: fields?.repo_path || null,
+    }).returning();
+    return toProjectNodeStatus(row);
+  }
+
+  async listProjectNodeStatuses(projectId: string): Promise<ProjectNodeCloneStatus[]> {
+    const rows = await db.select().from(projectNodeStatus)
+      .where(eq(projectNodeStatus.project_id, projectId));
+    return rows.map(toProjectNodeStatus);
   }
 }
 

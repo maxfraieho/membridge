@@ -252,3 +252,60 @@ export const registerWorkerSchema = z.object({
 });
 
 export type RegisterWorkerInput = z.infer<typeof registerWorkerSchema>;
+
+export type ProjectCloneStatus = "pending" | "cloning" | "cloned" | "failed" | "propagating" | "synced";
+
+export const managedProjects = pgTable("managed_projects", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull(),
+  repo_url: text("repo_url").notNull(),
+  canonical_id: text("canonical_id").notNull(),
+  target_path: text("target_path"),
+  clone_status: text("clone_status").$type<ProjectCloneStatus>().notNull().default("pending"),
+  primary_node_id: text("primary_node_id"),
+  created_at: bigint("created_at", { mode: "number" }).notNull(),
+  updated_at: bigint("updated_at", { mode: "number" }).notNull(),
+  error_message: text("error_message"),
+});
+
+export const projectNodeStatus = pgTable("project_node_status", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  project_id: varchar("project_id").notNull(),
+  node_id: text("node_id").notNull(),
+  clone_status: text("clone_status").$type<ProjectCloneStatus>().notNull().default("pending"),
+  last_sync_at: bigint("last_sync_at", { mode: "number" }),
+  error_message: text("error_message"),
+  repo_path: text("repo_path"),
+});
+
+export interface ManagedProject {
+  id: string;
+  name: string;
+  repo_url: string;
+  canonical_id: string;
+  target_path: string | null;
+  clone_status: ProjectCloneStatus;
+  primary_node_id: string | null;
+  created_at: number;
+  updated_at: number;
+  error_message: string | null;
+}
+
+export interface ProjectNodeCloneStatus {
+  id: string;
+  project_id: string;
+  node_id: string;
+  clone_status: ProjectCloneStatus;
+  last_sync_at: number | null;
+  error_message: string | null;
+  repo_path: string | null;
+}
+
+export const createProjectSchema = z.object({
+  name: z.string().min(1).max(256),
+  repo_url: z.string().min(1).max(1024),
+  target_path: z.string().max(512).optional(),
+  primary_node_id: z.string().min(1).max(128).optional(),
+});
+
+export type CreateProjectInput = z.infer<typeof createProjectSchema>;

@@ -11,6 +11,7 @@ import {
   completeTaskSchema,
   runtimeConfigSchema,
   registerWorkerSchema,
+  createProjectSchema,
   type WorkerNode,
   type TaskStatus,
 } from "@shared/schema";
@@ -521,6 +522,241 @@ export async function registerRoutes(
     } catch (err: any) {
       res.status(502).json({ error: err.message || "Membridge unreachable" });
     }
+  });
+
+  // ─── Multi-Project Git Management ────────────────────────────────
+
+  app.get("/api/runtime/projects", async (_req, res) => {
+    const projects = await storage.listManagedProjects();
+    res.json(projects);
+  });
+
+  app.post("/api/runtime/projects", async (req, res) => {
+    const parsed = createProjectSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.flatten() });
+    }
+    const project = await storage.createManagedProject(parsed.data);
+    await storage.addAuditLog({
+      action: "project_created",
+      entity_type: "managed_project",
+      entity_id: project.id,
+      actor: "admin",
+      detail: `Created project "${project.name}" with repo ${project.repo_url}`,
+    });
+    res.status(201).json(project);
+  });
+
+  app.get("/api/runtime/projects/:id", async (req, res) => {
+    const project = await storage.getManagedProject(req.params.id);
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    const nodeStatuses = await storage.listProjectNodeStatuses(project.id);
+    res.json({ ...project, nodes: nodeStatuses });
+  });
+
+  app.delete("/api/runtime/projects/:id", async (req, res) => {
+    const project = await storage.getManagedProject(req.params.id);
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    await storage.deleteManagedProject(req.params.id);
+    await storage.addAuditLog({
+      action: "project_deleted",
+      entity_type: "managed_project",
+      entity_id: req.params.id,
+      actor: "admin",
+      detail: `Deleted project "${project.name}"`,
+    });
+    res.json({ removed: true, id: req.params.id });
+  });
+
+  app.post("/api/runtime/projects/:id/clone", async (req, res) => {
+    const project = await storage.getManagedProject(req.params.id);
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    const targetNodeId = req.body?.node_id || project.primary_node_id;
+    if (!targetNodeId) {
+      return res.status(400).json({ error: "No target node specified. Provide node_id in body or set primary_node_id on project." });
+    }
+
+    await storage.updateManagedProjectStatus(project.id, "cloning", {
+      primary_node_id: targetNodeId,
+      error_message: null,
+    });
+    await storage.upsertProjectNodeStatus(project.id, targetNodeId, "cloning");
+
+    try {
+      const worker = await storage.getWorker(targetNodeId);
+      if (!worker || !worker.url) {
+        throw new Error(`Worker "${targetNodeId}" not found or has no URL`);
+      }
+
+      const agentKey = process.env.MEMBRIDGE_AGENT_KEY || "";
+      const cloneResponse = await fetch(`${worker.url}/clone`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-MEMBRIDGE-AGENT": agentKey,
+        },
+        body: JSON.stringify({
+          repo_url: project.repo_url,
+          project_name: project.name,
+          target_path: project.target_path || undefined,
+        }),
+        signal: AbortSignal.timeout(60000),
+      });
+
+      if (!cloneResponse.ok) {
+        const errText = await cloneResponse.text();
+        throw new Error(`Agent returned ${cloneResponse.status}: ${errText}`);
+      }
+
+      const cloneResult = await cloneResponse.json();
+      await storage.updateManagedProjectStatus(project.id, "cloned");
+      await storage.upsertProjectNodeStatus(project.id, targetNodeId, "cloned", {
+        last_sync_at: Date.now(),
+        repo_path: cloneResult.path || project.target_path,
+      });
+
+      await storage.addAuditLog({
+        action: "project_cloned",
+        entity_type: "managed_project",
+        entity_id: project.id,
+        actor: "admin",
+        detail: `Cloned "${project.repo_url}" on node ${targetNodeId}`,
+      });
+
+      res.json({ status: "cloned", node: targetNodeId, result: cloneResult });
+    } catch (err: any) {
+      await storage.updateManagedProjectStatus(project.id, "failed", {
+        error_message: err.message,
+      });
+      await storage.upsertProjectNodeStatus(project.id, targetNodeId, "failed", {
+        error_message: err.message,
+      });
+      res.status(502).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/runtime/projects/:id/propagate", async (req, res) => {
+    const project = await storage.getManagedProject(req.params.id);
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    const workers = await storage.listWorkers();
+    const nodeStatuses = await storage.listProjectNodeStatuses(project.id);
+    const clonedNodes = new Set(nodeStatuses.filter(ns => ns.clone_status === "cloned" || ns.clone_status === "synced").map(ns => ns.node_id));
+
+    const targetNodes = workers.filter(w => !clonedNodes.has(w.id) && w.url);
+    if (targetNodes.length === 0) {
+      return res.json({ status: "nothing_to_propagate", message: "All nodes already have this project" });
+    }
+
+    await storage.updateManagedProjectStatus(project.id, "propagating");
+
+    const results: { node_id: string; status: string; error?: string }[] = [];
+    const agentKey = process.env.MEMBRIDGE_AGENT_KEY || "";
+
+    for (const worker of targetNodes) {
+      await storage.upsertProjectNodeStatus(project.id, worker.id, "cloning");
+      try {
+        const cloneResponse = await fetch(`${worker.url}/clone`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-MEMBRIDGE-AGENT": agentKey,
+          },
+          body: JSON.stringify({
+            repo_url: project.repo_url,
+            project_name: project.name,
+            target_path: project.target_path || undefined,
+          }),
+          signal: AbortSignal.timeout(60000),
+        });
+
+        if (!cloneResponse.ok) {
+          const errText = await cloneResponse.text();
+          throw new Error(`Agent returned ${cloneResponse.status}: ${errText}`);
+        }
+
+        const cloneResult = await cloneResponse.json();
+        await storage.upsertProjectNodeStatus(project.id, worker.id, "cloned", {
+          last_sync_at: Date.now(),
+          repo_path: cloneResult.path || project.target_path,
+        });
+        results.push({ node_id: worker.id, status: "cloned" });
+      } catch (err: any) {
+        await storage.upsertProjectNodeStatus(project.id, worker.id, "failed", {
+          error_message: err.message,
+        });
+        results.push({ node_id: worker.id, status: "failed", error: err.message });
+      }
+    }
+
+    const allCloned = results.every(r => r.status === "cloned");
+    await storage.updateManagedProjectStatus(project.id, allCloned ? "synced" : "failed");
+
+    await storage.addAuditLog({
+      action: "project_propagated",
+      entity_type: "managed_project",
+      entity_id: project.id,
+      actor: "admin",
+      detail: `Propagated to ${results.filter(r => r.status === "cloned").length}/${targetNodes.length} nodes`,
+    });
+
+    res.json({ status: allCloned ? "synced" : "partial", results });
+  });
+
+  app.post("/api/runtime/projects/:id/sync-memory", async (req, res) => {
+    const project = await storage.getManagedProject(req.params.id);
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    const direction = req.body?.direction || "push";
+    const targetNodeId = req.body?.node_id || project.primary_node_id;
+    if (!targetNodeId) {
+      return res.status(400).json({ error: "No target node specified" });
+    }
+
+    try {
+      const response = await membridgeFetch(`/sync/${direction}`, {
+        method: "POST",
+        body: JSON.stringify({
+          agent_name: targetNodeId,
+          project_name: project.name,
+        }),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Membridge returned ${response.status}: ${text}`);
+      }
+      const data = await response.json();
+      await storage.addAuditLog({
+        action: `memory_sync_${direction}`,
+        entity_type: "managed_project",
+        entity_id: project.id,
+        actor: "admin",
+        detail: `${direction} memory sync for "${project.name}" via node ${targetNodeId}`,
+      });
+      res.json({ status: "ok", direction, node: targetNodeId, result: data });
+    } catch (err: any) {
+      res.status(502).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/runtime/projects/:id/node-status", async (req, res) => {
+    const project = await storage.getManagedProject(req.params.id);
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    const nodeStatuses = await storage.listProjectNodeStatuses(project.id);
+    res.json(nodeStatuses);
   });
 
   // ─── Runtime Stats ─────────────────────────────────────────────
