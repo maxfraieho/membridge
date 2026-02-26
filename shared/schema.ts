@@ -302,9 +302,12 @@ export interface ProjectNodeCloneStatus {
 }
 
 export const createProjectSchema = z.object({
-  name: z.string().min(1).max(256),
-  repo_url: z.string().min(1).max(1024),
-  target_path: z.string().max(512).optional(),
+  name: z.string().min(1).max(256).regex(/^[a-zA-Z0-9_\-. ]+$/, "Name must be alphanumeric with dashes/underscores/dots/spaces"),
+  repo_url: z.string().min(1).max(1024).regex(/^https?:\/\/.+|^git@.+/, "Must be a valid HTTP(S) or git@ URL"),
+  target_path: z.string().max(512).regex(/^[a-zA-Z0-9_\-./~]+$/, "Path contains invalid characters").refine(
+    (p) => !p.includes(".."),
+    "Path must not contain '..' for security"
+  ).optional(),
   primary_node_id: z.string().min(1).max(128).optional(),
 });
 

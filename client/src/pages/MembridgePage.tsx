@@ -19,6 +19,12 @@ import {
   Hash,
   Network,
   AlertCircle,
+  GitBranch,
+  Plus,
+  Copy,
+  Trash2,
+  Database,
+  Loader2,
 } from "lucide-react";
 
 interface MembridgeProject {
@@ -26,6 +32,29 @@ interface MembridgeProject {
   canonical_id: string;
   path?: string;
   source?: string;
+}
+
+interface ManagedProject {
+  id: string;
+  name: string;
+  repo_url: string;
+  canonical_id: string;
+  target_path: string | null;
+  clone_status: string;
+  primary_node_id: string | null;
+  created_at: number;
+  updated_at: number;
+  error_message: string | null;
+}
+
+interface ProjectNodeCloneStatus {
+  id: string;
+  project_id: string;
+  node_id: string;
+  clone_status: string;
+  last_sync_at: number | null;
+  error_message: string | null;
+  repo_path: string | null;
 }
 
 interface LeadershipLease {
@@ -73,6 +102,381 @@ function roleBadge(role: string) {
   return <Badge data-testid={`badge-role-${role}`} variant="secondary">{role}</Badge>;
 }
 
+function cloneStatusBadge(status: string) {
+  const variants: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
+    synced: "default",
+    cloned: "default",
+    cloning: "secondary",
+    propagating: "secondary",
+    pending: "outline",
+    failed: "destructive",
+  };
+  return <Badge data-testid={`badge-clone-${status}`} variant={variants[status] || "outline"}>{status}</Badge>;
+}
+
+function AddProjectForm() {
+  const { toast } = useToast();
+  const [name, setName] = useState("");
+  const [repoUrl, setRepoUrl] = useState("");
+  const [targetPath, setTargetPath] = useState("");
+  const [primaryNode, setPrimaryNode] = useState("");
+
+  const createMutation = useMutation({
+    mutationFn: async () => {
+      const body: Record<string, any> = { name, repo_url: repoUrl };
+      if (targetPath.trim()) body.target_path = targetPath.trim();
+      if (primaryNode.trim()) body.primary_node_id = primaryNode.trim();
+      const res = await apiRequest("POST", "/api/runtime/projects", body);
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/runtime/projects"] });
+      toast({ title: "Project created", description: `"${data.name}" added. Now clone it to a node.` });
+      setName("");
+      setRepoUrl("");
+      setTargetPath("");
+      setPrimaryNode("");
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed to create project", description: err.message, variant: "destructive" });
+    },
+  });
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Plus className="h-4 w-4" />
+          Add Project
+        </CardTitle>
+        <CardDescription>
+          Add a git repository to clone and sync across all nodes.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="grid gap-4 max-w-lg">
+          <div className="space-y-2">
+            <Label htmlFor="add-project-name">Project Name</Label>
+            <Input
+              id="add-project-name"
+              data-testid="input-project-name"
+              placeholder="e.g. membridge"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="add-repo-url">Repository URL</Label>
+            <Input
+              id="add-repo-url"
+              data-testid="input-repo-url"
+              placeholder="https://github.com/user/repo.git"
+              value={repoUrl}
+              onChange={(e) => setRepoUrl(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="add-target-path">Target Path (optional)</Label>
+            <Input
+              id="add-target-path"
+              data-testid="input-target-path"
+              placeholder="e.g. ~/projects/membridge"
+              value={targetPath}
+              onChange={(e) => setTargetPath(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="add-primary-node">Primary Node (optional)</Label>
+            <Input
+              id="add-primary-node"
+              data-testid="input-primary-node"
+              placeholder="e.g. rpi4b"
+              value={primaryNode}
+              onChange={(e) => setPrimaryNode(e.target.value)}
+            />
+          </div>
+          <Button
+            data-testid="button-create-project"
+            onClick={() => createMutation.mutate()}
+            disabled={createMutation.isPending || !name.trim() || !repoUrl.trim()}
+          >
+            {createMutation.isPending ? (
+              <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Creating...</>
+            ) : (
+              <><GitBranch className="h-4 w-4 mr-2" />Add Project</>
+            )}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ManagedProjectCard({
+  project,
+  onSelect,
+}: {
+  project: ManagedProject;
+  onSelect: () => void;
+}) {
+  const { toast } = useToast();
+
+  const cloneMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/runtime/projects/${project.id}/clone`, {});
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/runtime/projects"] });
+      toast({ title: "Clone started", description: `Cloning "${project.name}" on primary node.` });
+    },
+    onError: (err: Error) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/runtime/projects"] });
+      toast({ title: "Clone failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const propagateMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/runtime/projects/${project.id}/propagate`, {});
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/runtime/projects"] });
+      const count = data.results?.filter((r: any) => r.status === "cloned").length || 0;
+      toast({ title: "Propagation complete", description: `Cloned to ${count} additional node(s).` });
+    },
+    onError: (err: Error) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/runtime/projects"] });
+      toast({ title: "Propagation failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("DELETE", `/api/runtime/projects/${project.id}`);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/runtime/projects"] });
+      toast({ title: "Project removed", description: `"${project.name}" deleted.` });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const isCloned = project.clone_status === "cloned" || project.clone_status === "synced";
+  const isBusy = cloneMutation.isPending || propagateMutation.isPending || deleteMutation.isPending;
+
+  return (
+    <Card data-testid={`card-managed-project-${project.id}`}>
+      <CardContent className="pt-4 pb-4">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex-1 min-w-0 cursor-pointer" onClick={onSelect}>
+            <div className="flex items-center gap-2 mb-1">
+              <GitBranch className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+              <span className="font-medium text-sm truncate" data-testid={`text-project-name-${project.id}`}>
+                {project.name}
+              </span>
+              {cloneStatusBadge(project.clone_status)}
+            </div>
+            <div className="text-xs text-muted-foreground font-mono truncate" data-testid={`text-repo-url-${project.id}`}>
+              {project.repo_url}
+            </div>
+            <div className="flex gap-3 mt-1 text-xs text-muted-foreground">
+              <span>CID: {project.canonical_id}</span>
+              {project.primary_node_id && <span>Primary: {project.primary_node_id}</span>}
+              <span>{formatRelative(project.created_at)}</span>
+            </div>
+            {project.error_message && (
+              <div className="flex items-center gap-1 mt-1 text-xs text-destructive">
+                <AlertCircle className="h-3 w-3" />
+                {project.error_message}
+              </div>
+            )}
+          </div>
+          <div className="flex gap-1 flex-shrink-0">
+            {!isCloned && (
+              <Button
+                data-testid={`button-clone-${project.id}`}
+                variant="outline"
+                size="sm"
+                disabled={isBusy || !project.primary_node_id}
+                onClick={() => cloneMutation.mutate()}
+                title={!project.primary_node_id ? "Set a primary node first" : "Clone to primary node"}
+              >
+                {cloneMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Copy className="h-3 w-3" />}
+              </Button>
+            )}
+            {isCloned && (
+              <Button
+                data-testid={`button-propagate-${project.id}`}
+                variant="outline"
+                size="sm"
+                disabled={isBusy}
+                onClick={() => propagateMutation.mutate()}
+                title="Propagate to all other nodes"
+              >
+                {propagateMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Network className="h-3 w-3" />}
+              </Button>
+            )}
+            <Button
+              data-testid={`button-delete-${project.id}`}
+              variant="ghost"
+              size="sm"
+              disabled={isBusy}
+              onClick={() => deleteMutation.mutate()}
+            >
+              <Trash2 className="h-3 w-3 text-destructive" />
+            </Button>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ManagedProjectDetail({ project }: { project: ManagedProject }) {
+  const { toast } = useToast();
+
+  const nodeStatusQuery = useQuery<ProjectNodeCloneStatus[]>({
+    queryKey: ["/api/runtime/projects", project.id, "node-status"],
+    refetchInterval: 10000,
+  });
+
+  const syncMutation = useMutation({
+    mutationFn: async (direction: string) => {
+      const res = await apiRequest("POST", `/api/runtime/projects/${project.id}/sync-memory`, { direction });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({ title: "Memory sync", description: `${data.direction} completed via ${data.node}` });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Sync failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const nodeStatuses = nodeStatusQuery.data || [];
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Database className="h-4 w-4" />
+            Project Details: {project.name}
+          </CardTitle>
+          <CardDescription>
+            {project.repo_url}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <div className="text-xs text-muted-foreground mb-1">Status</div>
+              <div data-testid="text-detail-status">{cloneStatusBadge(project.clone_status)}</div>
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground mb-1">Canonical ID</div>
+              <div className="font-mono text-xs" data-testid="text-detail-cid">{project.canonical_id}</div>
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground mb-1">Primary Node</div>
+              <div className="text-sm" data-testid="text-detail-primary">{project.primary_node_id || "—"}</div>
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground mb-1">Created</div>
+              <div className="text-sm">{formatTime(project.created_at)}</div>
+            </div>
+          </div>
+          {project.primary_node_id && (project.clone_status === "cloned" || project.clone_status === "synced") && (
+            <div className="flex gap-2 mt-4">
+              <Button
+                data-testid="button-memory-push"
+                variant="outline"
+                size="sm"
+                disabled={syncMutation.isPending}
+                onClick={() => syncMutation.mutate("push")}
+              >
+                {syncMutation.isPending ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
+                Push Memory
+              </Button>
+              <Button
+                data-testid="button-memory-pull"
+                variant="outline"
+                size="sm"
+                disabled={syncMutation.isPending}
+                onClick={() => syncMutation.mutate("pull")}
+              >
+                {syncMutation.isPending ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
+                Pull Memory
+              </Button>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Server className="h-4 w-4" />
+              Node Clone Status
+            </CardTitle>
+            <Button
+              data-testid="button-refresh-node-status"
+              variant="ghost"
+              size="sm"
+              onClick={() => queryClient.invalidateQueries({ queryKey: ["/api/runtime/projects", project.id, "node-status"] })}
+            >
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+          </div>
+          <CardDescription>{nodeStatuses.length} node(s) tracked</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {nodeStatusQuery.isLoading ? (
+            <div className="text-sm text-muted-foreground py-4">Loading...</div>
+          ) : nodeStatuses.length === 0 ? (
+            <div className="text-sm text-muted-foreground py-4" data-testid="text-no-node-status">
+              No nodes have been cloned yet. Use Clone or Propagate.
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Node</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Path</TableHead>
+                  <TableHead>Last Sync</TableHead>
+                  <TableHead>Error</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {nodeStatuses.map((ns) => (
+                  <TableRow key={ns.id} data-testid={`row-node-clone-${ns.node_id}`}>
+                    <TableCell className="font-medium">{ns.node_id}</TableCell>
+                    <TableCell>{cloneStatusBadge(ns.clone_status)}</TableCell>
+                    <TableCell className="font-mono text-xs">{ns.repo_path || "—"}</TableCell>
+                    <TableCell className="text-muted-foreground">{formatRelative(ns.last_sync_at)}</TableCell>
+                    <TableCell>
+                      {ns.error_message ? (
+                        <span className="text-xs text-destructive">{ns.error_message}</span>
+                      ) : "—"}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 function ProjectList({
   projects,
   isLoading,
@@ -90,7 +494,7 @@ function ProjectList({
         <div className="flex items-center justify-between">
           <CardTitle className="flex items-center gap-2 text-base">
             <FolderOpen className="h-4 w-4" />
-            Projects
+            Membridge Projects
           </CardTitle>
           <Button
             data-testid="button-refresh-projects"
@@ -396,10 +800,16 @@ function PromotePrimaryForm({ cid }: { cid: string }) {
 
 export default function MembridgePage() {
   const [selectedCid, setSelectedCid] = useState<string | null>(null);
+  const [selectedManagedProject, setSelectedManagedProject] = useState<ManagedProject | null>(null);
 
   const projectsQuery = useQuery<MembridgeProject[]>({
     queryKey: ["/api/membridge/projects"],
     refetchInterval: 30000,
+  });
+
+  const managedProjectsQuery = useQuery<ManagedProject[]>({
+    queryKey: ["/api/runtime/projects"],
+    refetchInterval: 15000,
   });
 
   const leadershipQuery = useQuery<LeadershipLease>({
@@ -415,6 +825,7 @@ export default function MembridgePage() {
   });
 
   const projects = projectsQuery.data || [];
+  const managedProjects = managedProjectsQuery.data || [];
   const leadership = leadershipQuery.data || null;
   const nodes = nodesQuery.data || [];
 
@@ -426,47 +837,99 @@ export default function MembridgePage() {
             Membridge Control Plane
           </h1>
           <p className="text-muted-foreground mt-1">
-            Worker nodes, leadership leases, and project management
+            Multi-project git management, memory sync, and node orchestration
           </p>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-6">
+        <div className="space-y-8">
           <div>
-            <ProjectList
-              projects={projects}
-              isLoading={projectsQuery.isLoading}
-              selectedCid={selectedCid}
-              onSelect={setSelectedCid}
-            />
+            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2" data-testid="text-git-management-title">
+              <GitBranch className="h-5 w-5" />
+              Git Repository Management
+            </h2>
+            <div className="space-y-4">
+              <AddProjectForm />
+
+              {managedProjectsQuery.isLoading ? (
+                <div className="text-sm text-muted-foreground py-4">Loading managed projects...</div>
+              ) : managedProjects.length === 0 ? (
+                <Card>
+                  <CardContent className="py-8">
+                    <div className="text-center text-muted-foreground" data-testid="text-no-managed-projects">
+                      <GitBranch className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                      No managed projects yet. Add a repository above to get started.
+                    </div>
+                  </CardContent>
+                </Card>
+              ) : (
+                <div className="grid gap-3">
+                  {managedProjects.map((mp) => (
+                    <ManagedProjectCard
+                      key={mp.id}
+                      project={mp}
+                      onSelect={() => setSelectedManagedProject(
+                        selectedManagedProject?.id === mp.id ? null : mp
+                      )}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {selectedManagedProject && (
+                <>
+                  <Separator />
+                  <ManagedProjectDetail project={selectedManagedProject} />
+                </>
+              )}
+            </div>
           </div>
 
-          <div className="space-y-6">
-            {!selectedCid ? (
-              <Card>
-                <CardContent className="py-12">
-                  <div className="text-center text-muted-foreground" data-testid="text-select-project">
-                    <FolderOpen className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                    Select a project from the list to view its leadership and nodes.
-                  </div>
-                </CardContent>
-              </Card>
-            ) : (
-              <>
-                <LeadershipCard
-                  cid={selectedCid}
-                  leadership={leadership}
-                  isLoading={leadershipQuery.isLoading}
+          <Separator />
+
+          <div>
+            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2" data-testid="text-control-plane-title">
+              <Crown className="h-5 w-5" />
+              Membridge Control Plane
+            </h2>
+            <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-6">
+              <div>
+                <ProjectList
+                  projects={projects}
+                  isLoading={projectsQuery.isLoading}
+                  selectedCid={selectedCid}
+                  onSelect={setSelectedCid}
                 />
-                <Separator />
-                <NodesTable
-                  cid={selectedCid}
-                  nodes={nodes}
-                  isLoading={nodesQuery.isLoading}
-                />
-                <Separator />
-                <PromotePrimaryForm cid={selectedCid} />
-              </>
-            )}
+              </div>
+
+              <div className="space-y-6">
+                {!selectedCid ? (
+                  <Card>
+                    <CardContent className="py-12">
+                      <div className="text-center text-muted-foreground" data-testid="text-select-project">
+                        <FolderOpen className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                        Select a project from the list to view its leadership and nodes.
+                      </div>
+                    </CardContent>
+                  </Card>
+                ) : (
+                  <>
+                    <LeadershipCard
+                      cid={selectedCid}
+                      leadership={leadership}
+                      isLoading={leadershipQuery.isLoading}
+                    />
+                    <Separator />
+                    <NodesTable
+                      cid={selectedCid}
+                      nodes={nodes}
+                      isLoading={nodesQuery.isLoading}
+                    />
+                    <Separator />
+                    <PromotePrimaryForm cid={selectedCid} />
+                  </>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </div>
