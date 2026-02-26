@@ -980,6 +980,229 @@ async def system_info():
     return info
 
 
+SESSIONS_DIR = Path(os.environ.get("MEMBRIDGE_SESSIONS_DIR", os.path.expanduser("~/.membridge/sessions")))
+SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _session_file(context_id: str) -> Path:
+    safe_id = re.sub(r'[^a-zA-Z0-9_.-]', '_', context_id)
+    return SESSIONS_DIR / f"{safe_id}.json"
+
+
+def _load_session(context_id: str) -> dict:
+    sf = _session_file(context_id)
+    if sf.exists():
+        try:
+            return json.loads(sf.read_text())
+        except Exception:
+            pass
+    return {"context_id": context_id, "messages": [], "created_at": time.time()}
+
+
+def _save_session(context_id: str, session: dict) -> None:
+    sf = _session_file(context_id)
+    sf.write_text(json.dumps(session, indent=2, default=str))
+
+
+class ExecuteTaskRequest(BaseModel):
+    task_id: str = Field(..., description="BLOOM Runtime task ID")
+    prompt: str = Field(..., description="The prompt/instruction for Claude CLI")
+    context_id: str = Field(..., description="Context ID for session persistence")
+    agent_slug: str = Field(default="default", description="Agent persona/slug")
+    desired_format: str = Field(default="text", description="Output format: text or json")
+    context_hints: list[str] = Field(default_factory=list, description="Context hints for the prompt")
+    policy: dict = Field(default_factory=lambda: {"timeout_sec": 120, "budget": 0})
+    runtime_url: Optional[str] = Field(default=None, description="BLOOM Runtime URL for callbacks")
+
+
+@app.post("/execute-task")
+async def execute_task(body: ExecuteTaskRequest):
+    logger.info("execute-task: task_id=%s context_id=%s agent_slug=%s", body.task_id, body.context_id, body.agent_slug)
+
+    if not shutil.which("claude"):
+        raise HTTPException(status_code=503, detail="Claude CLI is not installed on this node")
+
+    if DRYRUN:
+        return {
+            "ok": True,
+            "dryrun": True,
+            "task_id": body.task_id,
+            "detail": f"[DRYRUN] Would execute Claude CLI for task {body.task_id}",
+        }
+
+    session = _load_session(body.context_id)
+    timeout = body.policy.get("timeout_sec", 120)
+
+    cmd = ["claude", "--print"]
+
+    if body.desired_format == "json":
+        cmd.extend(["--output-format", "json"])
+
+    if body.context_hints:
+        hints_text = "\n".join(f"- {h}" for h in body.context_hints)
+        full_prompt = f"Context:\n{hints_text}\n\n{body.prompt}"
+    else:
+        full_prompt = body.prompt
+
+    if session["messages"]:
+        recent = session["messages"][-10:]
+        history = "\n".join(
+            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content'][:500]}"
+            for m in recent
+        )
+        full_prompt = f"Previous conversation context:\n{history}\n\n---\n\nCurrent request:\n{full_prompt}"
+
+    cmd.extend(["-p", full_prompt])
+
+    env = os.environ.copy()
+    if body.agent_slug and body.agent_slug != "default":
+        env["CLAUDE_PROJECT_ID"] = body.agent_slug
+
+    start_time = time.time()
+
+    runtime_url = body.runtime_url or RUNTIME_URL
+    runtime_key = RUNTIME_API_KEY
+
+    async def _send_heartbeat():
+        if not runtime_url:
+            return
+        try:
+            headers: dict[str, str] = {"Content-Type": "application/json"}
+            if runtime_key:
+                headers["X-Runtime-API-Key"] = runtime_key
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    f"{runtime_url}/api/runtime/llm-tasks/{body.task_id}/heartbeat",
+                    headers=headers,
+                )
+        except Exception as e:
+            logger.debug("heartbeat for task %s failed: %s", body.task_id, e)
+
+    async def _complete_task(status: str, output: str | None, error_message: str | None, duration_ms: int, tokens: int | None = None):
+        if not runtime_url:
+            return
+        try:
+            headers: dict[str, str] = {"Content-Type": "application/json"}
+            if runtime_key:
+                headers["X-Runtime-API-Key"] = runtime_key
+            payload = {
+                "status": status,
+                "output": output,
+                "error_message": error_message,
+                "metrics": {"duration_ms": duration_ms, "tokens_used": tokens},
+            }
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                await client.post(
+                    f"{runtime_url}/api/runtime/llm-tasks/{body.task_id}/complete",
+                    json=payload,
+                    headers=headers,
+                )
+                logger.info("task %s completed callback sent: %s", body.task_id, status)
+        except Exception as e:
+            logger.warning("complete callback for task %s failed: %s", body.task_id, e)
+
+    try:
+        await _send_heartbeat()
+
+        loop = asyncio.get_event_loop()
+        result = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    env=env,
+                    cwd=str(AGENT_DIR),
+                ),
+            ),
+            timeout=timeout + 10,
+        )
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        output = result.stdout.strip() if result.stdout else ""
+        stderr = result.stderr.strip() if result.stderr else ""
+
+        session["messages"].append({"role": "user", "content": body.prompt, "ts": time.time()})
+        if output:
+            session["messages"].append({"role": "assistant", "content": output[:2000], "ts": time.time()})
+        session["last_used"] = time.time()
+        session["total_tasks"] = session.get("total_tasks", 0) + 1
+        _save_session(body.context_id, session)
+
+        if result.returncode == 0:
+            await _complete_task("success", output, None, duration_ms)
+            return {
+                "ok": True,
+                "task_id": body.task_id,
+                "output": _tail_lines(output, MAX_OUTPUT_LINES),
+                "duration_ms": duration_ms,
+                "returncode": result.returncode,
+                "context_id": body.context_id,
+                "session_messages": len(session["messages"]),
+                "detail": "Claude CLI execution completed",
+            }
+        else:
+            error_msg = stderr or f"Claude CLI returned exit code {result.returncode}"
+            await _complete_task("error", None, error_msg, duration_ms)
+            return {
+                "ok": False,
+                "task_id": body.task_id,
+                "error": error_msg,
+                "stdout": _tail_lines(output, 50) if output else None,
+                "stderr": _tail_lines(stderr, 50),
+                "duration_ms": duration_ms,
+                "returncode": result.returncode,
+                "detail": "Claude CLI execution failed",
+            }
+
+    except (asyncio.TimeoutError, subprocess.TimeoutExpired):
+        duration_ms = int((time.time() - start_time) * 1000)
+        await _complete_task("error", None, f"Timed out after {timeout}s", duration_ms)
+        return {
+            "ok": False,
+            "task_id": body.task_id,
+            "error": f"Claude CLI timed out after {timeout}s",
+            "duration_ms": duration_ms,
+            "detail": "Execution timed out",
+        }
+    except Exception as e:
+        duration_ms = int((time.time() - start_time) * 1000)
+        error_msg = str(e)
+        await _complete_task("error", None, error_msg, duration_ms)
+        logger.exception("execute-task failed: task_id=%s", body.task_id)
+        raise HTTPException(status_code=500, detail=f"Execution failed: {error_msg}")
+
+
+@app.get("/sessions")
+async def list_sessions():
+    sessions = []
+    if SESSIONS_DIR.exists():
+        for f in sorted(SESSIONS_DIR.iterdir()):
+            if f.suffix == ".json":
+                try:
+                    data = json.loads(f.read_text())
+                    sessions.append({
+                        "context_id": data.get("context_id", f.stem),
+                        "messages_count": len(data.get("messages", [])),
+                        "total_tasks": data.get("total_tasks", 0),
+                        "created_at": data.get("created_at"),
+                        "last_used": data.get("last_used"),
+                    })
+                except Exception:
+                    pass
+    return sessions
+
+
+@app.get("/sessions/{context_id}")
+async def get_session(context_id: str):
+    session = _load_session(context_id)
+    if not session.get("messages"):
+        raise HTTPException(status_code=404, detail=f"Session not found: {context_id}")
+    return session
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=AGENT_PORT)

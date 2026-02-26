@@ -11,6 +11,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Server,
   Plug,
@@ -21,12 +29,17 @@ import {
   Clock,
   Cpu,
   BarChart3,
+  Send,
+  Play,
+  Loader2,
+  MessageSquare,
 } from "lucide-react";
 
 import type {
   WorkerNode,
   Lease,
   LLMTask,
+  LLMResult,
   RuntimeConfig,
 } from "@shared/schema";
 
@@ -325,6 +338,176 @@ function LeasesTable() {
   );
 }
 
+function CreateTaskForm() {
+  const { toast } = useToast();
+  const [prompt, setPrompt] = useState("");
+  const [contextId, setContextId] = useState("");
+  const [agentSlug, setAgentSlug] = useState("default");
+  const [desiredFormat, setDesiredFormat] = useState<"text" | "json">("text");
+  const [autoDispatch, setAutoDispatch] = useState(true);
+
+  const workersQuery = useQuery<WorkerNode[]>({
+    queryKey: ["/api/runtime/workers"],
+  });
+
+  const createMutation = useMutation({
+    mutationFn: async () => {
+      const createRes = await apiRequest("POST", "/api/runtime/llm-tasks", {
+        prompt: prompt.trim(),
+        context_id: contextId.trim() || `ctx-${Date.now()}`,
+        agent_slug: agentSlug.trim() || "default",
+        desired_format: desiredFormat,
+        policy: { timeout_sec: 120, budget: 0 },
+      });
+      const task = await createRes.json();
+
+      if (autoDispatch && task.id) {
+        try {
+          const dispatchRes = await apiRequest("POST", `/api/runtime/llm-tasks/${task.id}/dispatch`);
+          const dispatch = await dispatchRes.json();
+          return { task, dispatch, dispatched: true };
+        } catch (err: any) {
+          return { task, dispatched: false, dispatchError: err.message };
+        }
+      }
+
+      return { task, dispatched: false };
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/runtime/llm-tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/runtime/leases"] });
+      if (data.dispatched) {
+        toast({
+          title: "Task created & dispatched",
+          description: `Task ${data.task.id.substring(0, 8)}... sent to worker for Claude CLI execution`,
+        });
+      } else if (data.dispatchError) {
+        toast({
+          title: "Task created, dispatch failed",
+          description: data.dispatchError,
+          variant: "destructive",
+        });
+      } else {
+        toast({ title: "Task created", description: `ID: ${data.task.id.substring(0, 8)}...` });
+      }
+      setPrompt("");
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed to create task", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const onlineWorkers = (workersQuery.data || []).filter(
+    (w) => w.status === "online" && w.capabilities?.claude_cli
+  );
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <MessageSquare className="h-5 w-5" />
+          Create Claude CLI Task
+        </CardTitle>
+        <CardDescription>
+          Send a prompt to be executed via Claude CLI on a worker node.
+          {onlineWorkers.length > 0 ? (
+            <span className="text-green-600 dark:text-green-400 ml-1">
+              {onlineWorkers.length} worker(s) with Claude CLI online
+            </span>
+          ) : (
+            <span className="text-destructive ml-1">
+              No workers with Claude CLI available
+            </span>
+          )}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="task-prompt">Prompt</Label>
+            <Textarea
+              id="task-prompt"
+              data-testid="input-task-prompt"
+              placeholder="Enter your prompt for Claude CLI..."
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={4}
+              className="font-mono text-sm"
+            />
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="task-context">Context ID</Label>
+              <Input
+                id="task-context"
+                data-testid="input-task-context"
+                placeholder="auto-generated"
+                value={contextId}
+                onChange={(e) => setContextId(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Same context ID = same session memory
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="task-agent">Agent Slug</Label>
+              <Input
+                id="task-agent"
+                data-testid="input-task-agent"
+                placeholder="default"
+                value={agentSlug}
+                onChange={(e) => setAgentSlug(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Maps to CLAUDE_PROJECT_ID
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="task-format">Output Format</Label>
+              <Select value={desiredFormat} onValueChange={(v) => setDesiredFormat(v as "text" | "json")}>
+                <SelectTrigger data-testid="select-task-format">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="text">Text</SelectItem>
+                  <SelectItem value="json">JSON</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4">
+            <Button
+              data-testid="button-create-task"
+              onClick={() => createMutation.mutate()}
+              disabled={createMutation.isPending || !prompt.trim() || onlineWorkers.length === 0}
+            >
+              {createMutation.isPending ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Executing...</>
+              ) : autoDispatch ? (
+                <><Send className="h-4 w-4 mr-2" />Create & Dispatch</>
+              ) : (
+                <><Play className="h-4 w-4 mr-2" />Create Task</>
+              )}
+            </Button>
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                data-testid="checkbox-auto-dispatch"
+                checked={autoDispatch}
+                onChange={(e) => setAutoDispatch(e.target.checked)}
+                className="rounded"
+              />
+              Auto-dispatch to worker
+            </label>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function TasksQueue() {
   const { toast } = useToast();
 
@@ -344,6 +527,27 @@ function TasksQueue() {
     },
     onError: (err: Error) => {
       toast({ title: "Requeue failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const dispatchMutation = useMutation({
+    mutationFn: async (taskId: string) => {
+      const res = await apiRequest("POST", `/api/runtime/llm-tasks/${taskId}/dispatch`);
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/runtime/llm-tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/runtime/leases"] });
+      toast({
+        title: data.dispatched ? "Task dispatched" : "Dispatch failed",
+        description: data.dispatched
+          ? `Sent to worker ${data.worker_id}`
+          : data.error,
+        variant: data.dispatched ? "default" : "destructive",
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Dispatch failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -395,6 +599,7 @@ function TasksQueue() {
               <TableRow>
                 <TableHead>Task ID</TableHead>
                 <TableHead>Agent</TableHead>
+                <TableHead>Prompt</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Worker</TableHead>
                 <TableHead>Attempts</TableHead>
@@ -409,6 +614,11 @@ function TasksQueue() {
                     {t.id.substring(0, 8)}...
                   </TableCell>
                   <TableCell>{t.agent_slug}</TableCell>
+                  <TableCell className="max-w-[200px]">
+                    <span className="text-xs text-muted-foreground truncate block" title={t.prompt}>
+                      {t.prompt.length > 60 ? `${t.prompt.substring(0, 60)}...` : t.prompt}
+                    </span>
+                  </TableCell>
                   <TableCell>{statusBadge(t.status)}</TableCell>
                   <TableCell>{t.worker_id || "—"}</TableCell>
                   <TableCell>{t.attempts}/{t.max_attempts}</TableCell>
@@ -416,17 +626,35 @@ function TasksQueue() {
                     {formatRelative(t.created_at)}
                   </TableCell>
                   <TableCell>
-                    {(t.status === "failed" || t.status === "dead") && (
-                      <Button
-                        data-testid={`button-requeue-${t.id}`}
-                        variant="outline"
-                        size="sm"
-                        onClick={() => requeueMutation.mutate(t.id)}
-                        disabled={requeueMutation.isPending}
-                      >
-                        Requeue
-                      </Button>
-                    )}
+                    <div className="flex gap-1">
+                      {t.status === "queued" && (
+                        <Button
+                          data-testid={`button-dispatch-${t.id}`}
+                          variant="outline"
+                          size="sm"
+                          onClick={() => dispatchMutation.mutate(t.id)}
+                          disabled={dispatchMutation.isPending}
+                          title="Dispatch to worker for Claude CLI execution"
+                        >
+                          {dispatchMutation.isPending ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <Send className="h-3 w-3" />
+                          )}
+                        </Button>
+                      )}
+                      {(t.status === "failed" || t.status === "dead") && (
+                        <Button
+                          data-testid={`button-requeue-${t.id}`}
+                          variant="outline"
+                          size="sm"
+                          onClick={() => requeueMutation.mutate(t.id)}
+                          disabled={requeueMutation.isPending}
+                        >
+                          Requeue
+                        </Button>
+                      )}
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -522,6 +750,8 @@ export default function RuntimeSettings() {
           </TabsContent>
 
           <TabsContent value="tasks" className="space-y-6">
+            <CreateTaskForm />
+            <Separator />
             <TasksQueue />
           </TabsContent>
 

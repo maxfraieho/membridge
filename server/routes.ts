@@ -843,6 +843,115 @@ echo "  POST /sync/push     - Push claude-mem.db to MinIO"
     res.json(logs);
   });
 
+  app.post("/api/runtime/llm-tasks/:id/dispatch", async (req, res) => {
+    const task = await storage.getTask(req.params.id);
+    if (!task) {
+      return res.status(404).json({ error: "Task not found" });
+    }
+    if (task.status !== "queued") {
+      return res.status(409).json({ error: `Task status is '${task.status}', expected 'queued'` });
+    }
+
+    const workers = await storage.listWorkers();
+    const targetWorkerId = req.body?.worker_id;
+    let selectedWorker: WorkerNode | null = null;
+
+    if (targetWorkerId) {
+      selectedWorker = workers.find((w) => w.id === targetWorkerId) || null;
+    } else {
+      const activeLeases = await storage.listLeases({ status: "active" });
+      const leaseCounts = new Map<string, number>();
+      for (const l of activeLeases) {
+        leaseCounts.set(l.worker_id, (leaseCounts.get(l.worker_id) || 0) + 1);
+      }
+      for (const w of workers) {
+        w.active_leases = leaseCounts.get(w.id) || 0;
+      }
+      selectedWorker = await pickWorker(workers, task.context_id);
+    }
+
+    if (!selectedWorker) {
+      return res.status(503).json({ error: "No available worker with free capacity" });
+    }
+    if (!selectedWorker.url) {
+      return res.status(400).json({ error: `Worker "${selectedWorker.id}" has no URL configured` });
+    }
+
+    const ttl = req.body?.ttl_seconds || LEASE_TTL_SECONDS;
+    const lease = await storage.createLease(task.id, selectedWorker.id, ttl, task.context_id);
+    await storage.updateTaskStatus(task.id, "leased", {
+      lease_id: lease.id,
+      worker_id: selectedWorker.id,
+      attempts: task.attempts + 1,
+    });
+
+    await storage.addAuditLog({
+      action: "task_dispatched",
+      entity_type: "llm_task",
+      entity_id: task.id,
+      actor: "router",
+      detail: `Task ${task.id} dispatched to worker ${selectedWorker.id}`,
+    });
+
+    const agentKey = process.env.MEMBRIDGE_AGENT_KEY || "";
+    const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
+    const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost:5000";
+    const runtimeUrl = `${protocol}://${host}`;
+
+    try {
+      const executeResponse = await fetch(`${selectedWorker.url}/execute-task`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-MEMBRIDGE-AGENT": agentKey,
+        },
+        body: JSON.stringify({
+          task_id: task.id,
+          prompt: task.prompt,
+          context_id: task.context_id,
+          agent_slug: task.agent_slug,
+          desired_format: task.desired_format,
+          context_hints: task.context_hints,
+          policy: task.policy,
+          runtime_url: runtimeUrl,
+        }),
+        signal: AbortSignal.timeout((task.policy.timeout_sec + 30) * 1000),
+      });
+
+      const data = await executeResponse.json();
+
+      if (!data.ok && !executeResponse.ok) {
+        await storage.updateTaskStatus(task.id, "failed");
+        if (lease) {
+          await storage.releaseLease(lease.id, "failed");
+        }
+      }
+
+      res.json({
+        dispatched: true,
+        task_id: task.id,
+        worker_id: selectedWorker.id,
+        lease_id: lease.id,
+        execution: data,
+      });
+    } catch (err: any) {
+      await storage.addAuditLog({
+        action: "dispatch_failed",
+        entity_type: "llm_task",
+        entity_id: task.id,
+        actor: "router",
+        detail: `Dispatch to ${selectedWorker.id} failed: ${err.message}`,
+      });
+
+      res.status(502).json({
+        dispatched: false,
+        task_id: task.id,
+        worker_id: selectedWorker.id,
+        error: err.message,
+      });
+    }
+  });
+
   app.post("/api/runtime/llm-tasks/:id/requeue", async (req, res) => {
     const task = await storage.getTask(req.params.id);
     if (!task) {
