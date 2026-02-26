@@ -58,6 +58,9 @@ export const workers = pgTable("workers", {
   db_sha: text("db_sha").notNull().default(""),
   registered_at: bigint("registered_at", { mode: "number" }).notNull(),
   active_leases: integer("active_leases").notNull().default(0),
+  agent_version: text("agent_version").notNull().default("unknown"),
+  os_info: text("os_info").notNull().default(""),
+  install_method: text("install_method").notNull().default("manual"),
 });
 
 export const runtimeArtifacts = pgTable("runtime_artifacts", {
@@ -124,6 +127,9 @@ export interface WorkerNode {
   db_sha: string;
   registered_at: number;
   active_leases: number;
+  agent_version: string;
+  os_info: string;
+  install_method: string;
 }
 
 export interface Lease {

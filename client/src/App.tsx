@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import RuntimeSettings from "@/pages/RuntimeSettings";
 import MembridgePage from "@/pages/MembridgePage";
+import NodeManagement from "@/pages/NodeManagement";
 
 function NavBar() {
   const [location] = useLocation();
@@ -13,6 +14,7 @@ function NavBar() {
   const links = [
     { href: "/runtime", label: "Runtime" },
     { href: "/membridge", label: "Membridge" },
+    { href: "/nodes", label: "Nodes" },
   ];
 
   return (
@@ -53,6 +55,7 @@ function Router() {
       <Route path="/" component={RuntimeSettings} />
       <Route path="/runtime" component={RuntimeSettings} />
       <Route path="/membridge" component={MembridgePage} />
+      <Route path="/nodes" component={NodeManagement} />
       <Route component={NotFound} />
     </Switch>
   );

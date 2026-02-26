@@ -97,6 +97,9 @@ function toWorkerNode(row: typeof workersTable.$inferSelect): WorkerNode {
     db_sha: row.db_sha,
     registered_at: row.registered_at,
     active_leases: row.active_leases,
+    agent_version: row.agent_version,
+    os_info: row.os_info,
+    install_method: row.install_method,
   };
 }
 
@@ -267,6 +270,9 @@ export class DatabaseStorage implements IStorage {
       db_sha: worker.db_sha,
       registered_at: worker.registered_at,
       active_leases: worker.active_leases,
+      agent_version: worker.agent_version,
+      os_info: worker.os_info,
+      install_method: worker.install_method,
     }).onConflictDoUpdate({
       target: workersTable.id,
       set: {
@@ -279,6 +285,9 @@ export class DatabaseStorage implements IStorage {
         obs_count: worker.obs_count,
         db_sha: worker.db_sha,
         active_leases: worker.active_leases,
+        agent_version: worker.agent_version,
+        os_info: worker.os_info,
+        install_method: worker.install_method,
       },
     }).returning();
     return toWorkerNode(row);

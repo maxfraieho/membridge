@@ -207,6 +207,9 @@ export async function registerRoutes(
       db_sha: existing?.db_sha ?? "",
       registered_at: existing?.registered_at ?? now,
       active_leases: 0,
+      agent_version: existing?.agent_version ?? "unknown",
+      os_info: existing?.os_info ?? "",
+      install_method: existing?.install_method ?? "manual",
     };
     const saved = await storage.upsertWorker(worker);
     await storage.addAuditLog({
@@ -233,6 +236,291 @@ export async function registerRoutes(
       detail: `Worker ${req.params.id} unregistered`,
     });
     res.json({ removed: true, id: req.params.id });
+  });
+
+  // ─── Agent Management ──────────────────────────────────────────
+
+  app.get("/api/runtime/workers/:id/agent-health", async (req, res) => {
+    const worker = await storage.getWorker(req.params.id);
+    if (!worker) {
+      return res.status(404).json({ error: "Worker not found" });
+    }
+    if (!worker.url) {
+      return res.status(400).json({ error: "Worker has no URL configured" });
+    }
+    try {
+      const response = await fetch(`${worker.url}/health`, {
+        signal: AbortSignal.timeout(10000),
+      });
+      const data = await response.json();
+
+      await storage.upsertWorker({
+        ...worker,
+        agent_version: data.version || worker.agent_version,
+        os_info: data.hostname || worker.os_info,
+        status: "online",
+        last_heartbeat: Date.now(),
+      });
+
+      res.json({ reachable: true, ...data });
+    } catch (err: any) {
+      await storage.upsertWorker({
+        ...worker,
+        status: "offline",
+        last_heartbeat: Date.now(),
+      });
+      res.json({ reachable: false, error: err.message });
+    }
+  });
+
+  app.post("/api/runtime/workers/:id/agent-update", async (req, res) => {
+    const worker = await storage.getWorker(req.params.id);
+    if (!worker) {
+      return res.status(404).json({ error: "Worker not found" });
+    }
+    if (!worker.url) {
+      return res.status(400).json({ error: "Worker has no URL configured" });
+    }
+
+    const agentKey = process.env.MEMBRIDGE_AGENT_KEY || "";
+    try {
+      const response = await fetch(`${worker.url}/self-update`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-MEMBRIDGE-AGENT": agentKey,
+        },
+        body: JSON.stringify({
+          repo_url: req.body?.repo_url || "https://github.com/maxfraieho/membridge.git",
+        }),
+        signal: AbortSignal.timeout(120000),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Agent returned ${response.status}: ${text}`);
+      }
+
+      const data = await response.json();
+      await storage.addAuditLog({
+        action: "agent_updated",
+        entity_type: "worker",
+        entity_id: worker.id,
+        actor: "admin",
+        detail: `Agent update triggered on ${worker.id}: ${JSON.stringify(data)}`,
+      });
+
+      if (data.version) {
+        await storage.upsertWorker({ ...worker, agent_version: data.version });
+      }
+
+      res.json({ status: "updated", ...data });
+    } catch (err: any) {
+      res.status(502).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/runtime/workers/:id/agent-restart", async (req, res) => {
+    const worker = await storage.getWorker(req.params.id);
+    if (!worker) {
+      return res.status(404).json({ error: "Worker not found" });
+    }
+    if (!worker.url) {
+      return res.status(400).json({ error: "Worker has no URL configured" });
+    }
+
+    const agentKey = process.env.MEMBRIDGE_AGENT_KEY || "";
+    try {
+      const response = await fetch(`${worker.url}/restart`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-MEMBRIDGE-AGENT": agentKey,
+        },
+        signal: AbortSignal.timeout(30000),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Agent returned ${response.status}: ${text}`);
+      }
+
+      const data = await response.json();
+      await storage.addAuditLog({
+        action: "agent_restarted",
+        entity_type: "worker",
+        entity_id: worker.id,
+        actor: "admin",
+        detail: `Agent restart triggered on ${worker.id}`,
+      });
+      res.json({ status: "restarted", ...data });
+    } catch (err: any) {
+      res.status(502).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/runtime/workers/:id/agent-uninstall", async (req, res) => {
+    const worker = await storage.getWorker(req.params.id);
+    if (!worker) {
+      return res.status(404).json({ error: "Worker not found" });
+    }
+    if (!worker.url) {
+      return res.status(400).json({ error: "Worker has no URL configured" });
+    }
+
+    const agentKey = process.env.MEMBRIDGE_AGENT_KEY || "";
+    try {
+      const response = await fetch(`${worker.url}/uninstall`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-MEMBRIDGE-AGENT": agentKey,
+        },
+        signal: AbortSignal.timeout(60000),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Agent returned ${response.status}: ${text}`);
+      }
+
+      const data = await response.json();
+      await storage.upsertWorker({ ...worker, status: "offline", agent_version: "uninstalled" });
+      await storage.addAuditLog({
+        action: "agent_uninstalled",
+        entity_type: "worker",
+        entity_id: worker.id,
+        actor: "admin",
+        detail: `Agent uninstalled from ${worker.id}`,
+      });
+      res.json({ status: "uninstalled", ...data });
+    } catch (err: any) {
+      res.status(502).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/runtime/agent-install-script", async (req, res) => {
+    const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
+    const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost:5000";
+    const autoUrl = `${protocol}://${host}`;
+    const serverUrl = req.query.server_url as string || autoUrl;
+    const agentKey = req.query.agent_key ? "YOUR_AGENT_KEY" : (process.env.MEMBRIDGE_AGENT_KEY || "YOUR_AGENT_KEY");
+    const nodeId = req.query.node_id as string || "$(hostname)";
+    const repoUrl = req.query.repo_url as string || "https://github.com/maxfraieho/membridge.git";
+    const port = req.query.port as string || "8001";
+
+    const script = `#!/bin/bash
+set -euo pipefail
+
+# Membridge Agent Installer
+# Generated by BLOOM Runtime Control Plane
+# Usage: curl -sSL http://YOUR_SERVER/api/runtime/agent-install-script | bash
+
+MEMBRIDGE_DIR="\${MEMBRIDGE_DIR:-\$HOME/membridge}"
+REPO_URL="${repoUrl}"
+SERVER_URL="${serverUrl}"
+AGENT_KEY="${agentKey}"
+NODE_ID="${nodeId}"
+AGENT_PORT="${port}"
+
+echo "=== Membridge Agent Installer ==="
+echo "Server: \$SERVER_URL"
+echo "Node ID: \$NODE_ID"
+echo "Install dir: \$MEMBRIDGE_DIR"
+echo ""
+
+# Check Python
+if ! command -v python3 &>/dev/null; then
+  echo "ERROR: python3 is required"
+  exit 1
+fi
+
+PYVER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+echo "Python version: \$PYVER"
+
+# Clone or update repo
+if [ -d "\$MEMBRIDGE_DIR/.git" ]; then
+  echo "Updating existing installation..."
+  cd "\$MEMBRIDGE_DIR"
+  git fetch origin
+  git reset --hard origin/main 2>/dev/null || git reset --hard origin/master
+else
+  echo "Cloning membridge..."
+  git clone "\$REPO_URL" "\$MEMBRIDGE_DIR"
+  cd "\$MEMBRIDGE_DIR"
+fi
+
+# Setup venv
+if [ ! -d "\$MEMBRIDGE_DIR/.venv" ]; then
+  echo "Creating virtual environment..."
+  python3 -m venv "\$MEMBRIDGE_DIR/.venv"
+fi
+
+echo "Installing dependencies..."
+"\$MEMBRIDGE_DIR/.venv/bin/pip" install -q fastapi uvicorn httpx pydantic boto3
+
+# Write agent config
+cat > "\$MEMBRIDGE_DIR/.env.agent" <<ENVEOF
+MEMBRIDGE_SERVER_URL=\$SERVER_URL
+MEMBRIDGE_AGENT_KEY=\$AGENT_KEY
+MEMBRIDGE_NODE_ID=\$NODE_ID
+MEMBRIDGE_AGENT_PORT=\$AGENT_PORT
+ENVEOF
+
+echo "Agent config written to \$MEMBRIDGE_DIR/.env.agent"
+
+# Setup systemd if available
+if command -v systemctl &>/dev/null && [ -d /etc/systemd/system ]; then
+  echo "Setting up systemd service..."
+  SUDO=""
+  if [ "$(id -u)" -ne 0 ]; then
+    SUDO="sudo"
+  fi
+
+  \$SUDO tee /etc/systemd/system/membridge-agent.service > /dev/null <<SVCEOF
+[Unit]
+Description=Membridge Agent Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=$(whoami)
+WorkingDirectory=\$MEMBRIDGE_DIR
+EnvironmentFile=\$MEMBRIDGE_DIR/.env.agent
+ExecStart=\$MEMBRIDGE_DIR/.venv/bin/python -m uvicorn agent.main:app --host 0.0.0.0 --port \$AGENT_PORT
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+
+  \$SUDO systemctl daemon-reload
+  \$SUDO systemctl enable membridge-agent
+  \$SUDO systemctl restart membridge-agent
+  echo "Service started on port \$AGENT_PORT"
+else
+  echo ""
+  echo "No systemd detected. Start manually:"
+  echo "  cd \$MEMBRIDGE_DIR && source .venv/bin/activate"
+  echo "  uvicorn agent.main:app --host 0.0.0.0 --port \$AGENT_PORT"
+fi
+
+# Register with control plane
+echo ""
+echo "Registering with control plane..."
+curl -sS -X POST "\$SERVER_URL/api/runtime/workers" \\
+  -H "Content-Type: application/json" \\
+  -d "{\\"name\\": \\"\$NODE_ID\\", \\"url\\": \\"http://\$(hostname -I | awk '{print \$1}'):\$AGENT_PORT\\", \\"status\\": \\"online\\"}" \\
+  || echo "Warning: Could not register with control plane (it may not be reachable)"
+
+echo ""
+echo "=== Installation complete ==="
+echo "Agent: http://\$(hostname -I | awk '{print \\$1}'):\$AGENT_PORT/health"
+`;
+
+    res.setHeader("Content-Type", "text/plain");
+    res.send(script);
   });
 
   app.post("/api/runtime/llm-tasks", async (req, res) => {
