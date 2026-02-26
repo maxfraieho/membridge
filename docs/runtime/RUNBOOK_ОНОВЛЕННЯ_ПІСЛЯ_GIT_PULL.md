@@ -5,17 +5,18 @@ tags:
   - layer:operations
   - format:runbook
 created: 2026-02-25
-updated: 2026-02-25
+updated: 2026-02-26
 title: "RUNBOOK_ОНОВЛЕННЯ_ПІСЛЯ_GIT_PULL"
 dg-publish: true
 ---
 
 # Runbook: Оновлення BLOOM Runtime після git pull
 
-> Створено: 2026-02-25
+> Створено: 2026-02-25 | Оновлено: 2026-02-26
 > Статус: Canonical
 > Аудиторія: Claude агент на локальному сервері (Alpine Linux)
 > Призначення: Prompt-інструкція для автоматичного оновлення, тестування та усунення проблем
+> Changelog: 2026-02-26 — додано smoke-тести Node Management, agent health, install script, managed projects
 
 ---
 
@@ -128,7 +129,7 @@ npx drizzle-kit push
 Changes applied successfully
 ```
 
-Будуть створені таблиці: `llm_tasks`, `leases`, `workers`, `runtime_artifacts`, `llm_results`, `audit_logs`, `runtime_settings`, `users`.
+Будуть створені таблиці: `llm_tasks`, `leases`, `workers`, `runtime_artifacts`, `llm_results`, `audit_logs`, `runtime_settings`, `users`, `managed_projects`, `project_node_status`.
 
 ### 0.6 Перевірити
 
@@ -137,7 +138,7 @@ source /etc/bloom-runtime.env
 psql $DATABASE_URL -c "\dt"
 ```
 
-Повинні бути видимі всі 8 таблиць.
+Повинні бути видимі всі 10 таблиць.
 
 ### Схема підключення (нова vs стара збірка)
 
@@ -348,6 +349,55 @@ curl -s "http://127.0.0.1:5000/api/runtime/audit?limit=5" \
 | `/api/runtime/workers` | 200 | Масив (може бути порожній) |
 | `/api/runtime/config` | 200 | `membridge_server_url` не порожній |
 | `/api/runtime/audit` | 200 | Масив записів (має містити попередні) |
+
+### 6.6 Node Management (НОВЕ)
+
+```bash
+# Workers з розширеними полями
+echo "=== Workers (extended) ==="
+curl -s http://127.0.0.1:5000/api/runtime/workers \
+  -H "X-Runtime-API-Key: $(grep RUNTIME_API_KEY /etc/bloom-runtime.env 2>/dev/null | cut -d= -f2)" \
+  | python3 -c "
+import sys, json
+workers = json.load(sys.stdin)
+for w in workers:
+    print(f'  {w[\"id\"]}: status={w[\"status\"]}, version={w.get(\"agent_version\",\"?\")}, os={w.get(\"os_info\",\"?\")}, method={w.get(\"install_method\",\"?\")}')
+"
+
+# Agent health check (якщо worker має URL)
+echo "=== Agent Health ==="
+WORKER_ID=$(curl -s http://127.0.0.1:5000/api/runtime/workers \
+  -H "X-Runtime-API-Key: $(grep RUNTIME_API_KEY /etc/bloom-runtime.env 2>/dev/null | cut -d= -f2)" \
+  | python3 -c "import sys,json; ws=json.load(sys.stdin); print(ws[0]['id'] if ws else '')" 2>/dev/null)
+
+if [ -n "$WORKER_ID" ]; then
+    curl -s "http://127.0.0.1:5000/api/runtime/workers/$WORKER_ID/agent-health" \
+      -H "X-Runtime-API-Key: $(grep RUNTIME_API_KEY /etc/bloom-runtime.env 2>/dev/null | cut -d= -f2)" \
+      | python3 -m json.tool
+fi
+
+# Install script generation
+echo "=== Install Script ==="
+curl -s "http://127.0.0.1:5000/api/runtime/agent-install-script?node_id=test-node" \
+  -H "X-Runtime-API-Key: $(grep RUNTIME_API_KEY /etc/bloom-runtime.env 2>/dev/null | cut -d= -f2)" \
+  | head -5
+echo "..."
+
+# Managed Projects
+echo "=== Managed Projects ==="
+curl -s http://127.0.0.1:5000/api/runtime/projects \
+  -H "X-Runtime-API-Key: $(grep RUNTIME_API_KEY /etc/bloom-runtime.env 2>/dev/null | cut -d= -f2)" \
+  | python3 -m json.tool
+```
+
+**Контрольна таблиця:**
+
+| Тест | Очікуваний код | Що перевіряти |
+|------|---------------|---------------|
+| Workers (extended) | 200 | `agent_version`, `os_info`, `install_method` поля присутні |
+| Agent health | 200 | `reachable: true/false` (залежить від доступності агента) |
+| Install script | 200 | Bash-скрипт з правильним SERVER_URL |
+| Managed projects | 200 | Масив проєктів (може бути порожній) |
 
 ---
 

@@ -5,8 +5,9 @@ tags:
   - layer:operations
   - authority:implementation
 created: 2026-02-25
-updated: 2026-02-25
+updated: 2026-02-26
 changelog:
+  - 2026-02-26 (rev 3): Додано NodeManagement.tsx, agent management API, multi-project git API.
   - 2026-02-25 (rev 2): Статус IMPLEMENTED. Повна документація українською.
   - 2026-02-25 (rev 1): Початкова специфікація (англ.)
 title: "REPLIT_MEMBRIDGE_UI_INTEGRATION"
@@ -56,8 +57,9 @@ Membridge Control Plane — це сервіс координації worker-но
 
 ```
 ┌─────────────────────────┐
-│  React frontend         │  /membridge — сторінка MembridgePage
-│  (браузер користувача)  │  /runtime  — сторінка RuntimeSettings
+│  React frontend         │  /runtime   — сторінка RuntimeSettings
+│  (браузер користувача)  │  /membridge — сторінка MembridgePage
+│                         │  /nodes     — сторінка NodeManagement
 └────────────┬────────────┘
              │  HTTP запити до /api/membridge/*
              ▼
@@ -91,9 +93,12 @@ Membridge Control Plane — це сервіс координації worker-но
 
 | Файл | Дія | Призначення |
 |------|-----|-------------|
-| `server/routes.ts` | Змінений | Додані proxy-маршрути `/api/membridge/*` |
-| `client/src/pages/MembridgePage.tsx` | Створений | UI Control Plane: проєкти, лідерство, ноди, промоція |
-| `client/src/App.tsx` | Змінений | Навігаційна панель (Runtime / Membridge) + маршрут `/membridge` |
+| `server/routes.ts` | Змінений | Додані proxy-маршрути `/api/membridge/*`, agent management, multi-project API |
+| `client/src/pages/MembridgePage.tsx` | Створений | UI Control Plane: проєкти, лідерство, ноди, промоція, git management |
+| `client/src/pages/NodeManagement.tsx` | Створений | Node & Agent Management: fleet overview, agent ops, install script |
+| `client/src/App.tsx` | Змінений | Навігаційна панель (Runtime / Membridge / Nodes) + маршрути |
+| `shared/schema.ts` | Змінений | Додані `managed_projects`, `project_node_status` таблиці; розширено `workers` |
+| `server/storage.ts` | Змінений | Додані CRUD для managed projects, upsert worker з agent_version/os_info |
 | `server/runtime/membridgeClient.ts` | Без змін | HTTP-клієнт з retry, backoff, timeout (використовується проксі) |
 | `server/middleware/runtimeAuth.ts` | Без змін | Аутентифікація X-Runtime-API-Key |
 
@@ -112,6 +117,29 @@ Membridge Control Plane — це сервіс координації worker-но
 | `GET` | `/api/membridge/projects/:cid/leadership` | `/projects/{cid}/leadership` | Lease лідерства |
 | `GET` | `/api/membridge/projects/:cid/nodes` | `/projects/{cid}/nodes` | Список нод проєкту |
 | `POST` | `/api/membridge/projects/:cid/leadership/select` | `/projects/{cid}/leadership/select` | Промоція primary-ноди |
+
+### Agent Management маршрути
+
+| Метод | Шлях | Опис |
+|-------|------|------|
+| `GET` | `/api/runtime/workers/:id/agent-health` | Health check агента (оновлює status + version) |
+| `POST` | `/api/runtime/workers/:id/agent-update` | git pull + restart на remote агенті |
+| `POST` | `/api/runtime/workers/:id/agent-restart` | Перезапуск systemd-сервісу |
+| `POST` | `/api/runtime/workers/:id/agent-uninstall` | Зупинка + видалення агента |
+| `GET` | `/api/runtime/agent-install-script` | Генерація bash one-liner (?node_id=, ?server_url=) |
+
+### Multi-Project Git маршрути
+
+| Метод | Шлях | Опис |
+|-------|------|------|
+| `GET` | `/api/runtime/projects` | Список managed git-проєктів |
+| `POST` | `/api/runtime/projects` | Створити проєкт (name, repo_url, target_path) |
+| `GET` | `/api/runtime/projects/:id` | Деталі + node statuses |
+| `DELETE` | `/api/runtime/projects/:id` | Видалити проєкт |
+| `POST` | `/api/runtime/projects/:id/clone` | Клонувати на конкретну ноду |
+| `POST` | `/api/runtime/projects/:id/propagate` | Поширити на всі ноди |
+| `POST` | `/api/runtime/projects/:id/sync-memory` | Push/pull claude-mem.db |
+| `GET` | `/api/runtime/projects/:id/node-status` | Статус клонування по нодах |
 
 ### Обробка помилок
 
@@ -203,15 +231,16 @@ detail: "Promoted primary to <node_id> for project <cid>"
 Верхня панель навігації відображається на всіх сторінках:
 
 ```
-┌──────────────────────────────────────────────┐
-│  BLOOM    [Runtime]  [Membridge]             │
-└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  BLOOM    [Runtime]  [Membridge]  [Nodes]             │
+└──────────────────────────────────────────────────────┘
 ```
 
 | Маршрут | Сторінка | Опис |
 |---------|----------|------|
 | `/` або `/runtime` | RuntimeSettings | Конфігурація Runtime, Workers, Leases, Tasks |
-| `/membridge` | MembridgePage | Control Plane: проєкти, лідерство, ноди |
+| `/membridge` | MembridgePage | Control Plane: проєкти, лідерство, ноди, git management |
+| `/nodes` | NodeManagement | Fleet overview, agent operations, install script |
 
 Активна вкладка підсвічується.
 
@@ -351,6 +380,10 @@ curl -X POST http://localhost:5000/api/membridge/projects/<cid>/leadership/selec
 3. `/api/membridge/projects/<cid>/nodes` → масив нод
 4. Сторінка `/membridge` у браузері — проєкти та ноди відображаються
 5. Audit log (`/api/runtime/audit`) — записи про дії leadership
+6. Сторінка `/nodes` — fleet overview, agent version, status відображаються
+7. `/api/runtime/workers` → масив з полями `agent_version`, `os_info`, `install_method`
+8. `/api/runtime/agent-install-script` → bash-скрипт з правильним SERVER_URL
+9. `/api/runtime/projects` → managed git-проєкти (якщо є)
 
 ---
 

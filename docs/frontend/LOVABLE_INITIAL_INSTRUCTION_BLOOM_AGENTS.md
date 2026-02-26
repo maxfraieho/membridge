@@ -5,7 +5,7 @@ tags:
   - format:prompt
   - feature:execution
 created: 2026-02-25
-updated: 2026-02-25
+updated: 2026-02-26
 tier: 1
 title: "Lovable Initial Instruction — BLOOM Agents & LLM Resources"
 ---
@@ -100,6 +100,24 @@ BLOOM Runtime API → Membridge Control Plane → Agent Daemons → Claude CLI (
 | `/api/runtime/stats` | GET | Статистика (tasks/leases/workers) |
 | `/api/runtime/audit` | GET | Audit log |
 | `/api/runtime/health` | GET | Здоров'я сервісу |
+| `/api/runtime/workers/:id/agent-health` | GET | Health check агента на ноді |
+| `/api/runtime/workers/:id/agent-update` | POST | Оновлення агента (git pull + restart) |
+| `/api/runtime/workers/:id/agent-restart` | POST | Перезапуск systemd-сервісу агента |
+| `/api/runtime/workers/:id/agent-uninstall` | POST | Видалення агента з ноди |
+| `/api/runtime/agent-install-script` | GET | Генерація bash-скрипта інсталяції (?node_id=, ?server_url=) |
+
+**Multi-Project Git Management:**
+
+| Endpoint | Метод | Опис |
+|----------|-------|------|
+| `/api/runtime/projects` | GET | Список managed git-проєктів |
+| `/api/runtime/projects` | POST | Створити managed проєкт (name, repo_url, target_path) |
+| `/api/runtime/projects/:id` | GET | Деталі проєкту + статус нод |
+| `/api/runtime/projects/:id` | DELETE | Видалити managed проєкт |
+| `/api/runtime/projects/:id/clone` | POST | Клонувати проєкт на конкретну ноду |
+| `/api/runtime/projects/:id/propagate` | POST | Поширити проєкт на всі ноди |
+| `/api/runtime/projects/:id/sync-memory` | POST | Push/pull claude-mem.db для проєкту |
+| `/api/runtime/projects/:id/node-status` | GET | Статус клонування по нодах |
 
 **Membridge Control Plane (проксі):**
 
@@ -185,24 +203,57 @@ Frontend НІКОЛИ не звертається до:
 - **Membridge Proxy** — конфігурація URL + admin key, test connection
 
 **Що додати/покращити:**
-- Worker list з real-time статусом (online/offline/syncing)
 - Task detail view з lease info та artifact
 - Lease timeline visualization
-- Worker registration form (POST /api/runtime/workers)
 
 ### 4.2 Membridge Control Plane (існує: MembridgePage.tsx)
 
-- Список проєктів sync
-- Leadership card (primary node, epoch, expires_at)
-- Nodes table з статусами
-- Promote primary form
+- Список проєктів sync (leadership card, nodes table, promote primary)
+- Multi-project git management:
+  - **Add Project** форма (name, repo_url, target_path)
+  - **Managed Project Cards** з clone/propagate/sync-memory кнопками
+  - **Per-node clone status** таблиця
+  - **Memory push/pull** для кожного проєкту
 
 **Що додати/покращити:**
 - Sync history / job log
-- Node health indicators
 - Visual leadership timeline
 
-### 4.3 Agent Memory Panel (існує: MemoryPanel.tsx)
+### 4.3 Node & Agent Management (існує: NodeManagement.tsx)
+
+Маршрут: `/nodes`
+
+Компоненти:
+- **Stat Cards** — Total Nodes / Online / Offline+Unknown (автооновлення 15с)
+- **Fleet Overview** — таблиця з agent_version, status, URL, IPs, last heartbeat
+- **Node Actions** — 5 кнопок на кожну ноду:
+  - ♥ Health Check → `GET /api/runtime/workers/:id/agent-health`
+  - ↑ Update → `POST /api/runtime/workers/:id/agent-update`
+  - ↻ Restart → `POST /api/runtime/workers/:id/agent-restart`
+  - ✕ Uninstall → `POST /api/runtime/workers/:id/agent-uninstall`
+  - 🗑 Remove → `DELETE /api/runtime/workers/:id`
+- **Install Script Card** — генерація curl one-liner (з полями Control Plane URL та Node ID)
+- **Register Node Form** — ручна реєстрація (Node ID + Agent URL)
+
+**Дані worker-ноди (розширені):**
+
+```typescript
+interface WorkerNode {
+  id: string;
+  node_id: string;
+  url: string;
+  status: "online" | "offline" | "syncing" | "error" | "unknown";
+  capabilities: { claude_cli: boolean; max_concurrency: number; labels: string[] };
+  last_heartbeat: number | null;
+  ip_addrs: string[];
+  active_leases: number;
+  agent_version: string;   // версія агента (наприклад "0.3.1")
+  os_info: string;         // hostname або OS info
+  install_method: string;  // "script" | "manual" | "unknown"
+}
+```
+
+### 4.4 Agent Memory Panel (існує: MemoryPanel.tsx)
 
 - Search (BM25 + LLM orchestrated)
 - Context assembly (4 depths: basic/wide/deep/temporal)
@@ -210,7 +261,7 @@ Frontend НІКОЛИ не звертається до:
 
 **Не чіпати:** Цей компонент вже працює. Зміни тільки через окремий prompt.
 
-### 4.4 Agent Catalog (планується: AgentsPage.tsx)
+### 4.5 Agent Catalog (планується: AgentsPage.tsx)
 
 - Agent cards з name, zone, status badge, order
 - Reorder (drag or ↑↓)
@@ -279,7 +330,30 @@ interface AuditLogEntry {
 }
 ```
 
-### 5.2 Для Agent Registry (нові)
+### 5.2 Для Multi-Project Git Management (визначені у shared/schema.ts)
+
+```typescript
+interface ManagedProject {
+  id: string;
+  name: string;           // regex: ^[a-zA-Z0-9_-]+$
+  repo_url: string;       // git URL
+  target_path: string;    // шлях на ноді (без "..")
+  status: "active" | "archived";
+  created_at: number;
+  primary_node_id: string | null;
+}
+
+interface ProjectNodeCloneStatus {
+  id: string;
+  project_id: string;
+  node_id: string;
+  status: "pending" | "cloning" | "cloned" | "failed" | "synced";
+  last_clone_at: number | null;
+  error: string | null;
+}
+```
+
+### 5.3 Для Agent Registry (нові)
 
 ```typescript
 type AgentStatus = 'active' | 'inactive' | 'draft';
@@ -398,10 +472,12 @@ API має rate limiting:
 - [[memory/API_CONTRACT]] — Memory API spec
 
 **Реалізація:**
-- `server/routes.ts` — Runtime API + Membridge proxy
+- `server/routes.ts` — Runtime API + Membridge proxy + Node Management API
 - `server/runtime/membridgeClient.ts` — Membridge HTTP client
 - `server/runtime/minioArtifacts.ts` — MinIO artifact storage
 - `server/runtime/workerSync.ts` — Worker auto-sync
 - `shared/schema.ts` — TypeScript types + Zod schemas
 - `client/src/pages/RuntimeSettings.tsx` — Runtime UI
-- `client/src/pages/MembridgePage.tsx` — Membridge Control Plane UI
+- `client/src/pages/MembridgePage.tsx` — Membridge Control Plane UI + Multi-project git management
+- `client/src/pages/NodeManagement.tsx` — Node & Agent fleet management UI
+- `client/src/App.tsx` — Навігація: Runtime / Membridge / Nodes
